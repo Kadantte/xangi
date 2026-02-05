@@ -14,6 +14,12 @@ import { createAgentRunner, getBackendDisplayName, type AgentRunner } from './ag
 import { processManager } from './process-manager.js';
 import { loadSkills, formatSkillList, type Skill } from './skills.js';
 import { startSlackBot } from './slack.js';
+import {
+  downloadFile,
+  extractFilePaths,
+  stripFilePaths,
+  buildPromptWithAttachments,
+} from './file-utils.js';
 
 // セッション管理（チャンネルID → セッションID）
 const sessions = new Map<string, string>();
@@ -26,16 +32,16 @@ async function main() {
   const slackAllowed = config.slack.allowedUsers || [];
 
   if (config.discord.enabled && discordAllowed.length === 0) {
-    console.error('[kbot] Error: ALLOWED_USER must be set for Discord');
+    console.error('[xangi] Error: ALLOWED_USER must be set for Discord');
     process.exit(1);
   }
   if (config.slack.enabled && slackAllowed.length === 0) {
-    console.error('[kbot] Error: SLACK_ALLOWED_USER or ALLOWED_USER must be set for Slack');
+    console.error('[xangi] Error: SLACK_ALLOWED_USER or ALLOWED_USER must be set for Slack');
     process.exit(1);
   }
   if (discordAllowed.length > 1 || slackAllowed.length > 1) {
-    console.error('[kbot] Error: Only one user per platform is allowed');
-    console.error('[kbot] 利用規約遵守のため、複数ユーザーの設定は禁止です');
+    console.error('[xangi] Error: Only one user per platform is allowed');
+    console.error('[xangi] 利用規約遵守のため、複数ユーザーの設定は禁止です');
     process.exit(1);
   }
 
@@ -55,7 +61,7 @@ async function main() {
   // スキルを読み込み
   const workdir = config.agent.config.workdir || process.cwd();
   let skills: Skill[] = loadSkills(workdir);
-  console.log(`[kbot] Loaded ${skills.length} skills from ${workdir}`);
+  console.log(`[xangi] Loaded ${skills.length} skills from ${workdir}`);
 
   // スラッシュコマンド定義
   const commands: ReturnType<SlashCommandBuilder['toJSON']>[] = [
@@ -100,26 +106,26 @@ async function main() {
 
   // スラッシュコマンド登録
   client.once(Events.ClientReady, async (c) => {
-    console.log(`[kbot] Ready! Logged in as ${c.user.tag}`);
+    console.log(`[xangi] Ready! Logged in as ${c.user.tag}`);
 
     const rest = new REST({ version: '10' }).setToken(config.discord.token);
     try {
       // ギルドコマンドとして登録（即時反映）
       const guilds = c.guilds.cache;
-      console.log(`[kbot] Found ${guilds.size} guilds`);
+      console.log(`[xangi] Found ${guilds.size} guilds`);
 
       for (const [guildId, guild] of guilds) {
         await rest.put(Routes.applicationGuildCommands(c.user.id, guildId), {
           body: commands,
         });
-        console.log(`[kbot] ${commands.length} slash commands registered for: ${guild.name}`);
+        console.log(`[xangi] ${commands.length} slash commands registered for: ${guild.name}`);
       }
 
       // グローバルコマンドをクリア（重複防止）
       await rest.put(Routes.applicationCommands(c.user.id), { body: [] });
-      console.log('[kbot] Cleared global commands');
+      console.log('[xangi] Cleared global commands');
     } catch (error) {
-      console.error('[kbot] Failed to register slash commands:', error);
+      console.error('[xangi] Failed to register slash commands:', error);
     }
   });
 
@@ -198,7 +204,7 @@ async function main() {
     if (!isMentioned && !isDM && !isAutoReplyChannel) return;
 
     if (!config.discord.allowedUsers?.includes(message.author.id)) {
-      console.log(`[kbot] Unauthorized user: ${message.author.id} (${message.author.tag})`);
+      console.log(`[xangi] Unauthorized user: ${message.author.id} (${message.author.tag})`);
       return;
     }
 
@@ -206,7 +212,28 @@ async function main() {
       .replace(/<@[!&]?\d+>|<#\d+>/g, '')
       .replace(/\s+/g, ' ')
       .trim();
-    if (!prompt) return;
+
+    // 添付ファイルをダウンロード
+    const attachmentPaths: string[] = [];
+    if (message.attachments.size > 0) {
+      for (const [, attachment] of message.attachments) {
+        try {
+          const filePath = await downloadFile(attachment.url, attachment.name || 'file');
+          attachmentPaths.push(filePath);
+        } catch (err) {
+          console.error(`[xangi] Failed to download attachment: ${attachment.name}`, err);
+        }
+      }
+    }
+
+    // テキストも添付もない場合はスキップ
+    if (!prompt && attachmentPaths.length === 0) return;
+
+    // 添付ファイル情報をプロンプトに追加
+    prompt = buildPromptWithAttachments(
+      prompt || '添付ファイルを確認してください',
+      attachmentPaths
+    );
 
     const channelId = message.channel.id;
 
@@ -228,7 +255,7 @@ async function main() {
   // Discordボットを起動
   if (config.discord.enabled) {
     await client.login(config.discord.token);
-    console.log('[kbot] Discord bot started');
+    console.log('[xangi] Discord bot started');
   }
 
   // Slackボットを起動
@@ -242,12 +269,12 @@ async function main() {
         return skills;
       },
     });
-    console.log('[kbot] Slack bot started');
+    console.log('[xangi] Slack bot started');
   }
 
   if (!config.discord.enabled && !config.slack.enabled) {
     console.error(
-      '[kbot] No chat platform enabled. Set DISCORD_TOKEN or SLACK_BOT_TOKEN/SLACK_APP_TOKEN'
+      '[xangi] No chat platform enabled. Set DISCORD_TOKEN or SLACK_BOT_TOKEN/SLACK_APP_TOKEN'
     );
     process.exit(1);
   }
@@ -298,7 +325,7 @@ async function handleSkill(
     sessions.set(channelId, newSessionId);
     await interaction.editReply(result.slice(0, 2000));
   } catch (error) {
-    console.error('[kbot] Error:', error);
+    console.error('[xangi] Error:', error);
     await interaction.editReply('エラーが発生しました');
   }
 }
@@ -327,7 +354,7 @@ async function handleSkillCommand(
     sessions.set(channelId, newSessionId);
     await interaction.editReply(result.slice(0, 2000));
   } catch (error) {
-    console.error('[kbot] Error:', error);
+    console.error('[xangi] Error:', error);
     await interaction.editReply('エラーが発生しました');
   }
 }
@@ -344,7 +371,7 @@ async function processPrompt(
   config: ReturnType<typeof loadConfig>
 ) {
   try {
-    console.log(`[kbot] Processing message in channel ${channelId}`);
+    console.log(`[xangi] Processing message in channel ${channelId}`);
     await message.react('👀').catch(() => {});
 
     const sessionId = sessions.get(channelId);
@@ -373,7 +400,7 @@ async function processPrompt(
               replyMessage
                 .edit(fullText.slice(0, 2000) + ' ▌')
                 .catch((err) => {
-                  console.error('[kbot] Failed to edit message:', err.message);
+                  console.error('[xangi] Failed to edit message:', err.message);
                 })
                 .finally(() => {
                   pendingUpdate = false;
@@ -405,13 +432,27 @@ async function processPrompt(
 
     sessions.set(channelId, newSessionId);
     console.log(
-      `[kbot] Response length: ${result.length}, session: ${newSessionId.slice(0, 8)}...`
+      `[xangi] Response length: ${result.length}, session: ${newSessionId.slice(0, 8)}...`
     );
 
-    // 最終結果を更新
-    await replyMessage.edit(result.slice(0, 2000));
+    // ファイルパスを抽出して添付送信
+    const filePaths = extractFilePaths(result);
+    const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
+
+    await replyMessage.edit(displayText.slice(0, 2000) || '✅');
+
+    if (filePaths.length > 0 && 'send' in message.channel) {
+      try {
+        await message.channel.send({
+          files: filePaths.map((fp) => ({ attachment: fp })),
+        });
+        console.log(`[xangi] Sent ${filePaths.length} file(s) to Discord`);
+      } catch (err) {
+        console.error('[xangi] Failed to send files:', err);
+      }
+    }
   } catch (error) {
-    console.error('[kbot] Error:', error);
+    console.error('[xangi] Error:', error);
     await message.reply('エラーが発生しました');
   }
 }

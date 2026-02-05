@@ -1,6 +1,6 @@
 # Discord Bot セットアップガイド
 
-kbot を Discord で使用するための Bot 作成手順。
+xangi を Discord で使用するための Bot 作成手順。
 
 ## 1. Discord Developer Portal にアクセス
 
@@ -11,7 +11,7 @@ Discord アカウントでログイン。
 ## 2. 新しいアプリケーション作成
 
 1. 右上の **「New Application」** をクリック
-2. 名前を入力: `kbot`（任意の名前）
+2. 名前を入力: `xangi`（任意の名前）
 3. **「Create」** をクリック
 
 ## 3. Bot 作成とトークン取得
@@ -75,12 +75,12 @@ npm run build
 docker compose up -d --build
 
 # ログ確認
-docker logs -f kbot
+docker logs -f xangi
 ```
 
 Discord サーバーで `/new` や `/skills` を試す、または Bot をメンションして話しかける：
 ```
-@kbot こんにちは！
+@xangi こんにちは！
 ```
 
 ## ユーザー ID の取得方法

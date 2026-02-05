@@ -20,7 +20,6 @@ export interface Config {
     enabled: boolean;
     botToken?: string;
     appToken?: string;
-    signingSecret?: string;
     allowedUsers?: string[];
     autoReplyChannels?: string[];
     replyInThread?: boolean;
@@ -78,7 +77,6 @@ export function loadConfig(): Config {
       enabled: !!slackBotToken && !!slackAppToken,
       botToken: slackBotToken,
       appToken: slackAppToken,
-      signingSecret: process.env.SLACK_SIGNING_SECRET,
       allowedUsers: slackAllowedUsers,
       autoReplyChannels:
         process.env.SLACK_AUTO_REPLY_CHANNELS?.split(',')

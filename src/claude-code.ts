@@ -2,6 +2,13 @@ import { spawn } from 'child_process';
 import { processManager } from './process-manager.js';
 import type { RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 
+// チャットプラットフォーム連携用のシステムプロンプト
+const CHAT_SYSTEM_PROMPT = `あなたはチャットプラットフォーム（Discord/Slack）経由で会話しています。
+ファイルをチャットに送信する場合は、出力に MEDIA:/path/to/file の形式でファイルパスを含めてください。
+対応形式: png, jpg, jpeg, gif, webp, mp3, mp4, wav, flac, pdf, zip
+例: 画像を生成した場合 → MEDIA:/tmp/output.png
+ユーザーが添付したファイルは [添付ファイル] としてパスが渡されます。`;
+
 export interface ClaudeCodeOptions {
   model?: string;
   timeoutMs?: number;
@@ -51,6 +58,9 @@ export class ClaudeCodeRunner {
     if (this.model) {
       args.push('--model', this.model);
     }
+
+    // チャットプラットフォーム連携のシステムプロンプト
+    args.push('--append-system-prompt', CHAT_SYSTEM_PROMPT);
 
     args.push(prompt);
 
@@ -153,6 +163,9 @@ export class ClaudeCodeRunner {
     if (this.model) {
       args.push('--model', this.model);
     }
+
+    // チャットプラットフォーム連携のシステムプロンプト
+    args.push('--append-system-prompt', CHAT_SYSTEM_PROMPT);
 
     args.push(prompt);
 

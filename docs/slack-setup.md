@@ -1,6 +1,6 @@
 # Slack App セットアップガイド
 
-kbot を Slack で使用するための App 作成手順。
+xangi を Slack で使用するための App 作成手順。
 
 ## 1. Slack API にアクセス
 
@@ -12,18 +12,18 @@ Slack アカウントでログイン。
 
 1. **「Create New App」** をクリック
 2. **「From scratch」** を選択
-3. App Name: `kbot`（任意の名前）
+3. App Name: `xangi`（任意の名前）
 4. ワークスペースを選択
 5. **「Create App」** をクリック
 
 ## 3. Socket Mode を有効化（重要）
 
-kbot は Socket Mode で動作します（Webhook 不要）。
+xangi は Socket Mode で動作します（Webhook 不要）。
 
 1. 左メニュー **「Socket Mode」** をクリック
 2. **「Enable Socket Mode」** を ON
 3. App-Level Token を作成：
-   - Token Name: `kbot-socket`
+   - Token Name: `xangi-socket`
    - Scopes: `connections:write`
    - **「Generate」** をクリック
 4. 表示された **App Token（xapp-...）をコピー**
@@ -79,13 +79,7 @@ kbot は Socket Mode で動作します（Webhook 不要）。
 3. 権限を確認して **「許可する」**
 4. 表示された **Bot User OAuth Token（xoxb-...）をコピー**
 
-## 8. Signing Secret を取得
-
-1. 左メニュー **「Basic Information」** をクリック
-2. **「App Credentials」** セクション
-3. **「Signing Secret」** の **「Show」** をクリックしてコピー
-
-## 9. 環境変数を設定
+## 8. 環境変数を設定
 
 ```bash
 # .env を編集
@@ -99,14 +93,11 @@ SLACK_BOT_TOKEN=xoxb-your-bot-token
 # Slack App Token（xapp-...）Socket Mode 用
 SLACK_APP_TOKEN=xapp-your-app-token
 
-# Slack Signing Secret
-SLACK_SIGNING_SECRET=your-signing-secret
-
 # 許可するユーザー ID（Slack の User ID）
 ALLOWED_USER=U01234567
 ```
 
-## 10. 動作確認
+## 9. 動作確認
 
 ```bash
 # ビルド
@@ -116,11 +107,11 @@ npm run build
 docker compose up -d --build
 
 # ログ確認
-docker logs -f kbot
+docker logs -f xangi
 ```
 
 Slack で以下を試す：
-- Bot をメンション: `@kbot こんにちは！`
+- Bot をメンション: `@xangi こんにちは！`
 - DM を送信
 - `/new` コマンド
 - `/skills` コマンド
@@ -140,7 +131,7 @@ Slack で以下を試す：
 
 1. Socket Mode が有効になっているか確認
 2. Event Subscriptions で `app_mention`, `message.im` が設定されているか確認
-3. Bot がチャンネルに招待されているか確認（`/invite @kbot`）
+3. Bot がチャンネルに招待されているか確認（`/invite @xangi`）
 4. `ALLOWED_USER` が Slack の User ID になっているか確認
 
 ### スラッシュコマンドが動かない
@@ -162,7 +153,7 @@ Slack で以下を試す：
 Bot をチャンネルで使うには、チャンネルに招待する必要があります：
 
 ```
-/invite @kbot
+/invite @xangi
 ```
 
 ## セキュリティ注意事項

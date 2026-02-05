@@ -5,12 +5,175 @@ import type { AgentRunner } from './agent-runner.js';
 import { processManager } from './process-manager.js';
 import type { Skill } from './skills.js';
 import { formatSkillList } from './skills.js';
+import {
+  downloadFile,
+  extractFilePaths,
+  stripFilePaths,
+  buildPromptWithAttachments,
+} from './file-utils.js';
 
 // ストリーミング更新の間隔（ミリ秒）
 const STREAM_UPDATE_INTERVAL_MS = 1000;
 
 // セッション管理（チャンネルID → セッションID）
 const sessions = new Map<string, string>();
+
+// 最後のBotメッセージ（チャンネルID → メッセージts）
+const lastBotMessages = new Map<string, string>();
+
+// Slack メッセージバイト数制限（chat.updateはバイト数で制限される）
+const SLACK_MAX_TEXT_BYTES = 3900;
+
+/**
+ * 文字列をUTF-8バイト数で安全に切り詰める
+ * マルチバイト文字の途中で切れないように処理
+ */
+function sliceByBytes(str: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(str).length <= maxBytes) {
+    return str;
+  }
+  // バイナリサーチで最大文字位置を見つける
+  let lo = 0;
+  let hi = str.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (encoder.encode(str.slice(0, mid)).length <= maxBytes) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return str.slice(0, lo);
+}
+
+// 結果送信（長い場合は分割）
+async function sendSlackResult(
+  client: WebClient,
+  channelId: string,
+  messageTs: string,
+  threadTs: string | undefined,
+  result: string
+): Promise<void> {
+  const text = sliceByBytes(result, SLACK_MAX_TEXT_BYTES);
+  const textBytes = new TextEncoder().encode(text).length;
+  console.log(
+    `[slack] sendSlackResult: textChars=${text.length}, textBytes=${textBytes}, resultChars=${result.length}`
+  );
+
+  try {
+    await client.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text,
+    });
+
+    // 残りのテキストがあれば分割送信
+    if (text.length < result.length) {
+      const remaining = result.slice(text.length);
+      const chunks = splitTextByBytes(remaining, SLACK_MAX_TEXT_BYTES);
+      console.log(
+        `[slack] Sending remaining ${chunks.length} chunks (${remaining.length} chars left)`
+      );
+      for (const chunk of chunks) {
+        await client.chat.postMessage({
+          channel: channelId,
+          text: chunk,
+          ...(threadTs && { thread_ts: threadTs }),
+        });
+      }
+    }
+  } catch (err: unknown) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    console.error('[slack] Failed to update final message:', errorMessage);
+
+    if (errorMessage.includes('msg_too_long')) {
+      console.log(`[slack] Fallback: trying shorter text (2000 bytes)`);
+      // テキストを短くしてリトライ
+      try {
+        await client.chat.update({
+          channel: channelId,
+          ts: messageTs,
+          text: sliceByBytes(result, 2000),
+        });
+        console.log(`[slack] Fallback: short update succeeded`);
+      } catch {
+        console.log(`[slack] Fallback: short update failed, using placeholder`);
+        // それでもダメなら新規メッセージとして投稿
+        await client.chat
+          .update({
+            channel: channelId,
+            ts: messageTs,
+            text: '（長文のため別メッセージで送信）',
+          })
+          .catch(() => {});
+      }
+
+      // 残りを分割送信
+      const chunks = splitTextByBytes(result, SLACK_MAX_TEXT_BYTES);
+      console.log(`[slack] Fallback: sending ${chunks.length} chunks`);
+      for (const chunk of chunks) {
+        await client.chat.postMessage({
+          channel: channelId,
+          text: chunk,
+          ...(threadTs && { thread_ts: threadTs }),
+        });
+      }
+      console.log(`[slack] Fallback: all chunks sent`);
+    } else {
+      // その他のエラーは再throw
+      throw err;
+    }
+  }
+}
+
+// テキストをバイト数で分割
+function splitTextByBytes(text: string, maxBytes: number): string[] {
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    const chunk = sliceByBytes(remaining, maxBytes);
+    chunks.push(chunk);
+    remaining = remaining.slice(chunk.length);
+  }
+  return chunks;
+}
+
+// メッセージ削除の共通関数
+async function deleteMessage(client: WebClient, channelId: string, arg: string): Promise<string> {
+  let messageTs: string | undefined;
+
+  if (arg) {
+    // 引数がある場合: ts または メッセージリンクから抽出
+    const linkMatch = arg.match(/\/p(\d{10})(\d{6})/);
+    if (linkMatch) {
+      messageTs = `${linkMatch[1]}.${linkMatch[2]}`;
+    } else if (/^\d+\.\d+$/.test(arg)) {
+      messageTs = arg;
+    } else {
+      return '無効な形式です。メッセージリンクまたは ts を指定してください';
+    }
+  } else {
+    messageTs = lastBotMessages.get(channelId);
+    if (!messageTs) {
+      return '削除できるメッセージがありません';
+    }
+  }
+
+  try {
+    await client.chat.delete({
+      channel: channelId,
+      ts: messageTs,
+    });
+    if (!arg) {
+      lastBotMessages.delete(channelId);
+    }
+    return '🗑️ メッセージを削除しました';
+  } catch (err) {
+    console.error('[slack] Failed to delete message:', err);
+    return 'メッセージの削除に失敗しました';
+  }
+}
 
 export interface SlackChannelOptions {
   config: Config;
@@ -45,8 +208,30 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       return;
     }
 
-    const text = (event.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();
-    if (!text) return;
+    let text = (event.text || '').replace(/<@[A-Z0-9]+>/g, '').trim();
+
+    // 添付ファイルをダウンロード
+    const attachmentPaths: string[] = [];
+    const files = (event as unknown as Record<string, unknown>).files as
+      | Array<{ url_private_download?: string; name?: string }>
+      | undefined;
+    if (files && files.length > 0) {
+      for (const file of files) {
+        if (file.url_private_download) {
+          try {
+            const filePath = await downloadFile(file.url_private_download, file.name || 'file', {
+              Authorization: `Bearer ${config.slack.botToken}`,
+            });
+            attachmentPaths.push(filePath);
+          } catch (err) {
+            console.error(`[slack] Failed to download attachment: ${file.name}`, err);
+          }
+        }
+      }
+    }
+
+    if (!text && attachmentPaths.length === 0) return;
+    text = buildPromptWithAttachments(text || '添付ファイルを確認してください', attachmentPaths);
 
     const channelId = event.channel;
     const threadTs = config.slack.replyInThread ? event.thread_ts || event.ts : undefined;
@@ -71,6 +256,17 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       return;
     }
 
+    // 削除コマンド
+    if (text === '!delete' || text === 'delete' || text.startsWith('!delete ')) {
+      const arg = text.replace(/^!?delete\s*/, '').trim();
+      const result = await deleteMessage(client, channelId, arg);
+      await say({
+        text: result,
+        ...(threadTs && { thread_ts: threadTs }),
+      });
+      return;
+    }
+
     // 👀 リアクション追加
     await client.reactions
       .add({
@@ -82,7 +278,7 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
         console.error('[slack] Failed to add reaction:', err.message || err);
       });
 
-    await processMessage(channelId, threadTs, text, client, agentRunner, config);
+    await processMessage(channelId, threadTs, text, event.ts, client, agentRunner, config);
   });
 
   // DMの処理 + autoReplyChannels
@@ -96,6 +292,7 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       channel: string;
       ts: string;
       channel_type?: string;
+      files?: Array<{ url_private_download?: string; name?: string }>;
     };
 
     console.log(
@@ -110,14 +307,40 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       return;
     }
 
+    // autoReplyChannels でメンション付きメッセージは app_mention で処理済みなのでスキップ
+    const textRaw = messageEvent.text || '';
+    if (isAutoReplyChannel && /<@[A-Z0-9]+>/i.test(textRaw)) {
+      console.log(`[slack] Skipping mention in autoReplyChannel (handled by app_mention)`);
+      return;
+    }
+
     // 許可リストチェック
     if (!config.slack.allowedUsers?.includes(messageEvent.user)) {
       console.log(`[slack] Unauthorized user: ${messageEvent.user}`);
       return;
     }
 
-    const text = messageEvent.text || '';
-    if (!text) return;
+    let text = messageEvent.text || '';
+
+    // 添付ファイルをダウンロード
+    const dmAttachmentPaths: string[] = [];
+    if (messageEvent.files && messageEvent.files.length > 0) {
+      for (const file of messageEvent.files) {
+        if (file.url_private_download) {
+          try {
+            const filePath = await downloadFile(file.url_private_download, file.name || 'file', {
+              Authorization: `Bearer ${config.slack.botToken}`,
+            });
+            dmAttachmentPaths.push(filePath);
+          } catch (err) {
+            console.error(`[slack] Failed to download attachment: ${file.name}`, err);
+          }
+        }
+      }
+    }
+
+    if (!text && dmAttachmentPaths.length === 0) return;
+    text = buildPromptWithAttachments(text || '添付ファイルを確認してください', dmAttachmentPaths);
 
     const channelId = messageEvent.channel;
     const threadTs = config.slack.replyInThread ? messageEvent.ts : undefined;
@@ -142,6 +365,17 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       return;
     }
 
+    // 削除コマンド
+    if (text === '!delete' || text === 'delete' || text.startsWith('!delete ')) {
+      const arg = text.replace(/^!?delete\s*/, '').trim();
+      const result = await deleteMessage(client, channelId, arg);
+      await say({
+        text: result,
+        ...(threadTs && { thread_ts: threadTs }),
+      });
+      return;
+    }
+
     // 👀 リアクション追加
     await client.reactions
       .add({
@@ -153,7 +387,7 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
         console.error('[slack] Failed to add reaction:', err.message || err);
       });
 
-    await processMessage(channelId, threadTs, text, client, agentRunner, config);
+    await processMessage(channelId, threadTs, text, messageEvent.ts, client, agentRunner, config);
   });
 
   // /new コマンド
@@ -180,6 +414,21 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
 
     skills = reloadSkills();
     await respond({ text: formatSkillList(skills) });
+  });
+
+  // /delete コマンド（Botメッセージを削除）
+  // /delete → 直前のメッセージ
+  // /delete <ts> → 指定のメッセージ（tsまたはメッセージリンクから抽出）
+  app.command('/delete', async ({ command, ack, respond, client }) => {
+    await ack();
+
+    if (!config.slack.allowedUsers?.includes(command.user_id)) {
+      await respond({ text: '許可されていないユーザーです', response_type: 'ephemeral' });
+      return;
+    }
+
+    const result = await deleteMessage(client, command.channel_id, command.text.trim());
+    await respond({ text: result, response_type: 'ephemeral' });
   });
 
   // /skill コマンド
@@ -213,7 +462,7 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
       });
 
       sessions.set(channelId, newSessionId);
-      await respond({ text: result.slice(0, 3000) });
+      await respond({ text: sliceByBytes(result, SLACK_MAX_TEXT_BYTES) });
     } catch (error) {
       console.error('[slack] Error:', error);
       await respond({ text: 'エラーが発生しました' });
@@ -228,6 +477,7 @@ async function processMessage(
   channelId: string,
   threadTs: string | undefined,
   text: string,
+  originalTs: string,
   client: WebClient,
   agentRunner: AgentRunner,
   config: Config
@@ -261,6 +511,9 @@ async function processMessage(
       throw new Error('Failed to get message timestamp');
     }
 
+    // 最後のBotメッセージを保存
+    lastBotMessages.set(channelId, messageTs);
+
     let result: string;
     let newSessionId: string;
 
@@ -277,14 +530,22 @@ async function processMessage(
             if (now - lastUpdateTime >= STREAM_UPDATE_INTERVAL_MS && !pendingUpdate) {
               pendingUpdate = true;
               lastUpdateTime = now;
+              const streamText = sliceByBytes(fullText, SLACK_MAX_TEXT_BYTES - 10) + ' ▌';
+              const streamBytes = new TextEncoder().encode(streamText).length;
+              console.log(
+                `[slack] stream update: chars=${streamText.length}, bytes=${streamBytes}`
+              );
               client.chat
                 .update({
                   channel: channelId,
                   ts: messageTs,
-                  text: fullText.slice(0, 3000) + ' ▌',
+                  text: streamText,
                 })
                 .catch((err) => {
-                  console.error('[slack] Failed to update message:', err.message);
+                  console.error(
+                    `[slack] Failed to update message (bytes=${streamBytes}):`,
+                    err.message
+                  );
                 })
                 .finally(() => {
                   pendingUpdate = false;
@@ -324,12 +585,34 @@ async function processMessage(
     sessions.set(channelId, newSessionId);
     console.log(`[slack] Final result length: ${result.length}`);
 
-    // 最終結果を更新
-    await client.chat.update({
-      channel: channelId,
-      ts: messageTs,
-      text: result.slice(0, 3000),
-    });
+    // ファイルパスを抽出して添付送信
+    const filePaths = extractFilePaths(result);
+    const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
+
+    // 最終結果を更新（長い場合は分割送信）
+    await sendSlackResult(client, channelId, messageTs, threadTs, displayText || '✅');
+
+    if (filePaths.length > 0) {
+      try {
+        for (const fp of filePaths) {
+          const fileContent = await import('fs').then((fs) => fs.default.readFileSync(fp));
+          const filename = await import('path').then((path) => path.default.basename(fp));
+          const uploadArgs: Record<string, unknown> = {
+            channel_id: channelId,
+            file: fileContent,
+            filename,
+          };
+          if (threadTs) {
+            uploadArgs.thread_ts = threadTs;
+          }
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await client.filesUploadV2(uploadArgs as any);
+        }
+        console.log(`[slack] Sent ${filePaths.length} file(s)`);
+      } catch (err) {
+        console.error('[slack] Failed to upload files:', err);
+      }
+    }
   } catch (error) {
     console.error('[slack] Error:', error);
     await client.chat.postMessage({
@@ -337,5 +620,16 @@ async function processMessage(
       text: 'エラーが発生しました',
       ...(threadTs && { thread_ts: threadTs }),
     });
+  } finally {
+    // 👀 リアクションを削除
+    await client.reactions
+      .remove({
+        channel: channelId,
+        timestamp: originalTs,
+        name: 'eyes',
+      })
+      .catch((err) => {
+        console.error('[slack] Failed to remove reaction:', err.message || err);
+      });
   }
 }

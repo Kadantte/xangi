@@ -31,9 +31,17 @@ cp .env.example .env
 
 ### 2. 起動
 
+**ミニマム版（デフォルト）:**
 ```bash
-docker compose up -d --build
+docker compose up xangi -d --build
 ```
+
+**フル版（uv + Python 3.12 入り）:**
+```bash
+docker compose up xangi-max -d --build
+```
+
+フル版は `uv` コマンドで Python パッケージを管理できます。
 
 ### 3. AI CLI認証（コンテナ内）
 
@@ -60,15 +68,67 @@ docker exec -it xangi codex login --device-auth
 
 ### 4. GitHub CLI認証（オプション）
 
+ホストで `gh` が認証済みなら、トークンを `.env` に追加するだけでOK:
+
 ```bash
-docker exec -it xangi gh auth login
+echo "GH_TOKEN=$(gh auth token)" >> .env
 ```
 
-ブラウザ認証またはトークン入力で認証。ghコマンドが使えるようになります。
+その後コンテナを再起動:
+```bash
+docker compose up -d
+```
+
+**確認:**
+```bash
+docker exec xangi gh auth status
+```
 
 ### 5. 動作確認
 
 Discord/Slackでbotにメンションして話しかけてください。
+
+## ローカル実行（非推奨）
+
+Docker を使わずにホストで直接実行する方法。環境の分離ができないため非推奨。
+
+### 事前準備
+
+```bash
+# Node.js 22+ が必要
+node -v
+
+# Claude Code CLI
+curl -fsSL https://claude.ai/install.sh | bash
+
+# Codex CLI（AGENT_BACKEND=codex の場合）
+npm install -g @openai/codex
+```
+
+### ビルド & 起動
+
+```bash
+cd /path/to/xangi-dev
+npm install
+npm run build
+
+# .env を読み込んで起動
+node --env-file=.env dist/index.js
+```
+
+### 開発時
+
+```bash
+npm run dev
+```
+
+### 作業ディレクトリの設定
+
+Claude Code を実行するディレクトリを指定:
+
+```bash
+export WORKSPACE_PATH=/path/to/workspace
+```
 
 ## 使い方
 
@@ -108,7 +168,6 @@ Discord/Slackでbotにメンションして話しかけてください。
 |------|------|
 | `SLACK_BOT_TOKEN` | Slack Bot Token（xoxb-...） |
 | `SLACK_APP_TOKEN` | Slack App Token（xapp-...）※Socket Mode用 |
-| `SLACK_SIGNING_SECRET` | Slack Signing Secret |
 | `SLACK_AUTO_REPLY_CHANNELS` | メンションなしで応答するチャンネルID（カンマ区切り） |
 | `SLACK_ALLOWED_USER` | Slack用の許可ユーザーID |
 | `SLACK_REPLY_IN_THREAD` | スレッド返信するか（デフォルト: `true`） |
@@ -126,6 +185,32 @@ Discord/Slackでbotにメンションして話しかけてください。
 | `TIMEOUT_MS` | タイムアウト（デフォルト: 300000 = 5分） |
 
 **注意:** Discord または Slack のどちらか一方のTokenが必要です（両方設定すれば両方起動）。
+
+## IDの調べ方
+
+### Discord
+
+**ユーザーID:**
+1. Discord設定 → 詳細設定 → **開発者モード** を ON
+2. ユーザーを右クリック → **「ユーザーIDをコピー」**
+
+**チャンネルID:**
+1. 開発者モードを ON にした状態で
+2. チャンネルを右クリック → **「チャンネルIDをコピー」**
+
+### Slack
+
+**ユーザーID:**
+1. ユーザーのプロフィールを開く
+2. **「︙」**（その他）→ **「メンバーIDをコピー」**
+
+**チャンネルID:**
+1. チャンネル名を右クリック → **「リンクをコピー」**
+2. URLの末尾がチャンネルID: `https://xxx.slack.com/archives/C01234567` ← `C01234567` がID
+
+または:
+1. チャンネルを開く → チャンネル名をクリック
+2. 一番下に **チャンネルID** が表示される
 
 ## マウント設定
 
