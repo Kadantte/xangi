@@ -11,9 +11,8 @@ import {
   stripFilePaths,
   buildPromptWithAttachments,
 } from './file-utils.js';
-
-// ストリーミング更新の間隔（ミリ秒）
-const STREAM_UPDATE_INTERVAL_MS = 1000;
+import { loadSettings, saveSettings, formatSettings } from './settings.js';
+import { STREAM_UPDATE_INTERVAL_MS } from './constants.js';
 
 // セッション管理（チャンネルID → セッションID）
 const sessions = new Map<string, string>();
@@ -140,6 +139,39 @@ function splitTextByBytes(text: string, maxBytes: number): string[] {
 }
 
 // メッセージ削除の共通関数
+/**
+ * AIの応答から SYSTEM_COMMAND: を検知して実行
+ */
+function handleSystemCommands(text: string): void {
+  const commands = text.match(/^SYSTEM_COMMAND:(.+)$/gm);
+  if (!commands) return;
+
+  for (const cmd of commands) {
+    const action = cmd.replace('SYSTEM_COMMAND:', '').trim();
+
+    if (action === 'restart') {
+      const settings = loadSettings();
+      if (!settings.autoRestart) {
+        console.log('[slack] Restart requested but autoRestart is disabled');
+        continue;
+      }
+      console.log('[slack] Restart requested by agent, restarting in 1s...');
+      setTimeout(() => process.exit(0), 1000);
+      return;
+    }
+
+    const setMatch = action.match(/^set\s+(\w+)=(.*)/);
+    if (setMatch) {
+      const [, key, value] = setMatch;
+      if (key === 'autoRestart') {
+        const enabled = value === 'true';
+        saveSettings({ autoRestart: enabled });
+        console.log(`[slack] autoRestart ${enabled ? 'enabled' : 'disabled'} by agent`);
+      }
+    }
+  }
+}
+
 async function deleteMessage(client: WebClient, channelId: string, arg: string): Promise<string> {
   let messageTs: string | undefined;
 
@@ -175,11 +207,14 @@ async function deleteMessage(client: WebClient, channelId: string, arg: string):
   }
 }
 
+import type { Scheduler } from './scheduler.js';
+
 export interface SlackChannelOptions {
   config: Config;
   agentRunner: AgentRunner;
   skills: Skill[];
   reloadSkills: () => Skill[];
+  scheduler?: Scheduler;
 }
 
 export async function startSlackBot(options: SlackChannelOptions): Promise<void> {
@@ -469,8 +504,49 @@ export async function startSlackBot(options: SlackChannelOptions): Promise<void>
     }
   });
 
+  // /settings コマンド
+  app.command('/settings', async ({ command, ack, respond }) => {
+    await ack();
+
+    if (!config.slack.allowedUsers?.includes(command.user_id)) {
+      await respond({ text: '許可されていないユーザーです', response_type: 'ephemeral' });
+      return;
+    }
+
+    const settings = loadSettings();
+    await respond({ text: formatSettings(settings) });
+  });
+
+  // /restart コマンド
+  app.command('/restart', async ({ command, ack, respond }) => {
+    await ack();
+
+    if (!config.slack.allowedUsers?.includes(command.user_id)) {
+      await respond({ text: '許可されていないユーザーです', response_type: 'ephemeral' });
+      return;
+    }
+
+    const settings = loadSettings();
+    if (!settings.autoRestart) {
+      await respond({ text: '⚠️ 自動再起動が無効です。先に有効にしてください。' });
+      return;
+    }
+    await respond({ text: '🔄 再起動します...' });
+    setTimeout(() => process.exit(0), 1000);
+  });
+
   await app.start();
   console.log('[slack] ⚡️ Slack bot is running!');
+
+  // スケジューラにSlack送信関数を登録
+  if (options.scheduler) {
+    options.scheduler.registerSender('slack', async (channelId, msg) => {
+      await app.client.chat.postMessage({
+        channel: channelId,
+        text: msg,
+      });
+    });
+  }
 }
 
 async function processMessage(
@@ -587,7 +663,13 @@ async function processMessage(
 
     // ファイルパスを抽出して添付送信
     const filePaths = extractFilePaths(result);
-    const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
+    let displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
+
+    // SYSTEM_COMMAND: 行を表示テキストから除去
+    displayText = displayText.replace(/^SYSTEM_COMMAND:.+$/gm, '').trim();
+
+    // SYSTEM_COMMAND: を検知して実行
+    handleSystemCommands(result);
 
     // 最終結果を更新（長い場合は分割送信）
     await sendSlackResult(client, channelId, messageTs, threadTs, displayText || '✅');

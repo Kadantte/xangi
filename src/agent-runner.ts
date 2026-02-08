@@ -1,6 +1,7 @@
 import type { AgentBackend, AgentConfig } from './config.js';
 import { ClaudeCodeRunner } from './claude-code.js';
 import { CodexRunner } from './codex-cli.js';
+import { PersistentRunner } from './persistent-runner.js';
 
 export interface RunOptions {
   skipPermissions?: boolean;
@@ -33,6 +34,11 @@ export interface AgentRunner {
 export function createAgentRunner(backend: AgentBackend, config: AgentConfig): AgentRunner {
   switch (backend) {
     case 'claude-code':
+      // persistent モードなら PersistentRunner を使用
+      if (config.persistent) {
+        console.log('[agent-runner] Using PersistentRunner (high-speed mode)');
+        return new PersistentRunner(config);
+      }
       return new ClaudeCodeRunner(config);
     case 'codex':
       return new CodexRunner(config);

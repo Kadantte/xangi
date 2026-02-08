@@ -1,5 +1,6 @@
 import { readdirSync, existsSync, readFileSync, statSync } from 'fs';
 import { join, basename } from 'path';
+import { DISCORD_SAFE_LENGTH } from './constants.js';
 
 export interface Skill {
   name: string;
@@ -139,8 +140,8 @@ export function formatSkillList(skills: Skill[]): string {
   lines.push('', '使い方: `/skill <スキル名>`');
 
   const result = lines.join('\n');
-  // 2000文字を超える場合はさらに切り詰め
-  if (result.length > 1900) {
+  // Discord文字数制限対応
+  if (result.length > DISCORD_SAFE_LENGTH) {
     const shortLines = [`📚 **利用可能なスキル** (${skills.length}件)`, ''];
     for (const skill of skills) {
       shortLines.push(`• **${skill.name}**`);

@@ -1,3 +1,5 @@
+import { DEFAULT_TIMEOUT_MS } from './constants.js';
+
 export type AgentBackend = 'claude-code' | 'codex';
 
 export interface AgentConfig {
@@ -5,6 +7,8 @@ export interface AgentConfig {
   timeoutMs?: number;
   workdir?: string;
   skipPermissions?: boolean;
+  /** 常駐プロセスモード（高速化） */
+  persistent?: boolean;
 }
 
 export interface Config {
@@ -56,9 +60,10 @@ export function loadConfig(): Config {
 
   const agentConfig: AgentConfig = {
     model: process.env.AGENT_MODEL || undefined,
-    timeoutMs: process.env.TIMEOUT_MS ? parseInt(process.env.TIMEOUT_MS, 10) : 300000,
+    timeoutMs: process.env.TIMEOUT_MS ? parseInt(process.env.TIMEOUT_MS, 10) : DEFAULT_TIMEOUT_MS,
     workdir: process.env.WORKSPACE_PATH || undefined,
     skipPermissions: process.env.SKIP_PERMISSIONS === 'true',
+    persistent: process.env.PERSISTENT_MODE !== 'false', // デフォルトで有効
   };
 
   return {

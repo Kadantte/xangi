@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { processManager } from './process-manager.js';
 import type { RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
+import { DEFAULT_TIMEOUT_MS } from './constants.js';
 
 export interface CodexOptions {
   model?: string;
@@ -20,7 +21,7 @@ export class CodexRunner {
 
   constructor(options?: CodexOptions) {
     this.model = options?.model;
-    this.timeoutMs = options?.timeoutMs ?? 300000; // デフォルト5分
+    this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS; // デフォルト5分
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
   }
