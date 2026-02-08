@@ -34,6 +34,8 @@ x-common: &common
     # Agent
     - AGENT_BACKEND=${AGENT_BACKEND:-claude-code}
     - AGENT_MODEL=${AGENT_MODEL:-}
+    # Scheduler data directory (for schedules.json)
+    - DATA_DIR=/workspace/.xangi
 
 services:
   # ミニマム版（デフォルト）
@@ -41,6 +43,8 @@ services:
     <<: *common
     build: .
     container_name: xangi
+    ports:
+      - "8080:8080"
 
   # フル版（uv + Python）
   xangi-max:
@@ -49,6 +53,8 @@ services:
       context: .
       dockerfile: Dockerfile.max
     container_name: xangi-max
+    ports:
+      - "8080:8080"
 
 volumes:
   claude-data:

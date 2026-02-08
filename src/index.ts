@@ -20,9 +20,51 @@ import {
   stripFilePaths,
   buildPromptWithAttachments,
 } from './file-utils.js';
+import { initSettings, loadSettings, saveSettings, formatSettings } from './settings.js';
+import { DISCORD_MAX_LENGTH, DISCORD_SAFE_LENGTH, STREAM_UPDATE_INTERVAL_MS } from './constants.js';
+import {
+  Scheduler,
+  parseScheduleInput,
+  formatScheduleList,
+  type Platform,
+  type ScheduleType,
+} from './scheduler.js';
+import { initSessions, getSession, setSession, deleteSession } from './sessions.js';
+import { join } from 'path';
 
-// セッション管理（チャンネルID → セッションID）
-const sessions = new Map<string, string>();
+/** メッセージを指定文字数で分割（行単位で分割を試みる） */
+function splitMessage(text: string, maxLength: number): string[] {
+  const chunks: string[] = [];
+  const lines = text.split('\n');
+  let current = '';
+  for (const line of lines) {
+    if (current.length + line.length + 1 > maxLength) {
+      if (current) chunks.push(current.trim());
+      current = line;
+    } else {
+      current += (current ? '\n' : '') + line;
+    }
+  }
+  if (current) chunks.push(current.trim());
+  return chunks;
+}
+
+/** スケジュールタイプに応じたラベルを生成 */
+function getTypeLabel(
+  type: ScheduleType,
+  options: { expression?: string; runAt?: string; channelInfo?: string }
+): string {
+  const channelInfo = options.channelInfo || '';
+  switch (type) {
+    case 'cron':
+      return `🔄 繰り返し: \`${options.expression}\`${channelInfo}`;
+    case 'startup':
+      return `🚀 起動時に実行${channelInfo}`;
+    case 'once':
+    default:
+      return `⏰ 実行時刻: ${new Date(options.runAt!).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}${channelInfo}`;
+  }
+}
 
 async function main() {
   const config = loadConfig();
@@ -63,6 +105,18 @@ async function main() {
   let skills: Skill[] = loadSkills(workdir);
   console.log(`[xangi] Loaded ${skills.length} skills from ${workdir}`);
 
+  // 設定を初期化
+  initSettings(workdir);
+  const initialSettings = loadSettings();
+  console.log(`[xangi] Settings loaded: autoRestart=${initialSettings.autoRestart}`);
+
+  // スケジューラを初期化
+  const dataDir = process.env.DATA_DIR || join(process.cwd(), '.xangi');
+  const scheduler = new Scheduler(dataDir);
+
+  // セッション永続化を初期化
+  initSessions(dataDir);
+
   // スラッシュコマンド定義
   const commands: ReturnType<SlashCommandBuilder['toJSON']>[] = [
     new SlashCommandBuilder().setName('new').setDescription('新しいセッションを開始する').toJSON(),
@@ -78,6 +132,40 @@ async function main() {
         option.setName('name').setDescription('スキル名').setRequired(true).setAutocomplete(true)
       )
       .addStringOption((option) => option.setName('args').setDescription('引数').setRequired(false))
+      .toJSON(),
+    new SlashCommandBuilder().setName('settings').setDescription('現在の設定を表示する').toJSON(),
+    new SlashCommandBuilder().setName('restart').setDescription('ボットを再起動する').toJSON(),
+    new SlashCommandBuilder()
+      .setName('schedule')
+      .setDescription('スケジュール管理')
+      .addSubcommand((sub) =>
+        sub
+          .setName('add')
+          .setDescription('スケジュールを追加')
+          .addStringOption((opt) =>
+            opt
+              .setName('input')
+              .setDescription('例: "30分後 ミーティング" / "毎日 9:00 おはよう"')
+              .setRequired(true)
+          )
+      )
+      .addSubcommand((sub) => sub.setName('list').setDescription('スケジュール一覧を表示'))
+      .addSubcommand((sub) =>
+        sub
+          .setName('remove')
+          .setDescription('スケジュールを削除')
+          .addStringOption((opt) =>
+            opt.setName('id').setDescription('スケジュールID').setRequired(true)
+          )
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName('toggle')
+          .setDescription('スケジュールの有効/無効を切り替え')
+          .addStringOption((opt) =>
+            opt.setName('id').setDescription('スケジュールID').setRequired(true)
+          )
+      )
       .toJSON(),
   ];
 
@@ -148,7 +236,7 @@ async function main() {
     const channelId = interaction.channelId;
 
     if (interaction.commandName === 'new') {
-      sessions.delete(channelId);
+      deleteSession(channelId);
       await interaction.reply('🆕 新しいセッションを開始しました');
       return;
     }
@@ -160,6 +248,28 @@ async function main() {
       } else {
         await interaction.reply({ content: '実行中のタスクはありません', ephemeral: true });
       }
+      return;
+    }
+
+    if (interaction.commandName === 'settings') {
+      const settings = loadSettings();
+      await interaction.reply(formatSettings(settings));
+      return;
+    }
+
+    if (interaction.commandName === 'restart') {
+      const settings = loadSettings();
+      if (!settings.autoRestart) {
+        await interaction.reply('⚠️ 自動再起動が無効です。先に有効にしてください。');
+        return;
+      }
+      await interaction.reply('🔄 再起動します...');
+      setTimeout(() => process.exit(0), 1000);
+      return;
+    }
+
+    if (interaction.commandName === 'schedule') {
+      await handleScheduleCommand(interaction, scheduler);
       return;
     }
 
@@ -192,6 +302,242 @@ async function main() {
     }
   });
 
+  // Discordリンクからメッセージ内容を取得する関数
+  async function fetchDiscordLinkContent(text: string): Promise<string> {
+    const linkRegex = /https?:\/\/(?:www\.)?discord\.com\/channels\/(\d+)\/(\d+)\/(\d+)/g;
+    const matches = [...text.matchAll(linkRegex)];
+
+    if (matches.length === 0) return text;
+
+    let result = text;
+    for (const match of matches) {
+      const [fullUrl, , channelId, messageId] = match;
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (channel && 'messages' in channel) {
+          const fetchedMessage = await channel.messages.fetch(messageId);
+          const author = fetchedMessage.author.tag;
+          const content = fetchedMessage.content || '(添付ファイルのみ)';
+          const attachmentInfo =
+            fetchedMessage.attachments.size > 0
+              ? `\n[添付: ${fetchedMessage.attachments.map((a) => a.name).join(', ')}]`
+              : '';
+
+          const quotedContent = `\n---\n📎 引用メッセージ (${author}):\n${content}${attachmentInfo}\n---\n`;
+          result = result.replace(fullUrl, quotedContent);
+          console.log(`[xangi] Fetched linked message from channel ${channelId}`);
+        }
+      } catch (err) {
+        console.error(`[xangi] Failed to fetch linked message: ${fullUrl}`, err);
+        // 取得失敗時はリンクをそのまま残す
+      }
+    }
+
+    return result;
+  }
+
+  // 返信元メッセージを取得してプロンプトに追加する関数
+  async function fetchReplyContent(message: Message): Promise<string | null> {
+    if (!message.reference?.messageId) return null;
+
+    try {
+      const channel = message.channel;
+      if (!('messages' in channel)) return null;
+
+      const repliedMessage = await channel.messages.fetch(message.reference.messageId);
+      const author = repliedMessage.author.tag;
+      const content = repliedMessage.content || '(添付ファイルのみ)';
+      const attachmentInfo =
+        repliedMessage.attachments.size > 0
+          ? `\n[添付: ${repliedMessage.attachments.map((a) => a.name).join(', ')}]`
+          : '';
+
+      console.log(`[xangi] Fetched reply-to message from ${author}`);
+      return `\n---\n💬 返信元 (${author}):\n${content}${attachmentInfo}\n---\n`;
+    } catch (err) {
+      console.error(`[xangi] Failed to fetch reply-to message:`, err);
+      return null;
+    }
+  }
+
+  // チャンネルメンションから最新メッセージを取得する関数
+  async function fetchChannelMessages(text: string): Promise<string> {
+    const channelMentionRegex = /<#(\d+)>/g;
+    const matches = [...text.matchAll(channelMentionRegex)];
+
+    if (matches.length === 0) return text;
+
+    let result = text;
+    for (const match of matches) {
+      const [fullMention, channelId] = match;
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (channel && 'messages' in channel) {
+          const messages = await channel.messages.fetch({ limit: 10 });
+          const channelName = 'name' in channel ? channel.name : 'unknown';
+
+          const messageList = messages
+            .reverse()
+            .map((m) => {
+              const time = m.createdAt.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+              const content = m.content || '(添付ファイルのみ)';
+              return `[${time}] ${m.author.tag}: ${content}`;
+            })
+            .join('\n');
+
+          const expandedContent = `\n---\n📺 #${channelName} の最新メッセージ:\n${messageList}\n---\n`;
+          result = result.replace(fullMention, expandedContent);
+          console.log(`[xangi] Fetched messages from channel #${channelName}`);
+        }
+      } catch (err) {
+        console.error(`[xangi] Failed to fetch channel messages: ${channelId}`, err);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * チャンネルメンション <#ID> にチャンネルID注釈を追加
+   * 例: <#123456> → <#123456> [チャンネルID: 123456]
+   */
+  function annotateChannelMentions(text: string): string {
+    return text.replace(/<#(\d+)>/g, (match, id) => `${match} [チャンネルID: ${id}]`);
+  }
+
+  // Discordコマンドを処理する関数
+  async function handleDiscordCommand(
+    text: string,
+    sourceMessage: Message
+  ): Promise<{ handled: boolean; response?: string }> {
+    // !discord send <#channelId> message
+    const sendMatch = text.match(/^!discord\s+send\s+<#(\d+)>\s+(.+)$/s);
+    if (sendMatch) {
+      const [, channelId, content] = sendMatch;
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (channel && 'send' in channel) {
+          // @everyone/@here メンションを防ぐ
+          await (
+            channel as {
+              send: (options: {
+                content: string;
+                allowedMentions: { parse: never[] };
+              }) => Promise<unknown>;
+            }
+          ).send({
+            content,
+            allowedMentions: { parse: [] },
+          });
+          const channelName = 'name' in channel ? channel.name : 'unknown';
+          console.log(`[xangi] Sent message to #${channelName}`);
+          return { handled: true, response: `✅ #${channelName} にメッセージを送信しました` };
+        }
+      } catch (err) {
+        console.error(`[xangi] Failed to send message to channel: ${channelId}`, err);
+        return { handled: true, response: `❌ チャンネルへの送信に失敗しました` };
+      }
+    }
+
+    // !discord channels
+    if (text.match(/^!discord\s+channels$/)) {
+      try {
+        const guild = sourceMessage.guild;
+        if (guild) {
+          const channels = guild.channels.cache
+            .filter((c) => c.type === 0) // テキストチャンネルのみ
+            .map((c) => `- #${c.name} (<#${c.id}>)`)
+            .join('\n');
+          return { handled: true, response: `📺 チャンネル一覧:\n${channels}` };
+        }
+      } catch (err) {
+        console.error(`[xangi] Failed to list channels`, err);
+        return { handled: true, response: `❌ チャンネル一覧の取得に失敗しました` };
+      }
+    }
+
+    // !discord search <keyword>
+    const searchMatch = text.match(/^!discord\s+search\s+(.+)$/);
+    if (searchMatch) {
+      const [, keyword] = searchMatch;
+      try {
+        // 現在のチャンネルで検索
+        const channel = sourceMessage.channel;
+        if ('messages' in channel) {
+          const messages = await channel.messages.fetch({ limit: 100 });
+          const matched = messages.filter((m) =>
+            m.content.toLowerCase().includes(keyword.toLowerCase())
+          );
+          if (matched.size > 0) {
+            const results = matched
+              .first(10)
+              ?.map((m) => `[${m.author.tag}] ${m.content.slice(0, 100)}`)
+              .join('\n');
+            return {
+              handled: true,
+              response: `🔍 「${keyword}」の検索結果 (${matched.size}件):\n${results}`,
+            };
+          }
+        }
+        return {
+          handled: true,
+          response: `🔍 「${keyword}」に一致するメッセージが見つかりませんでした`,
+        };
+      } catch (err) {
+        console.error(`[xangi] Failed to search messages`, err);
+        return { handled: true, response: `❌ 検索に失敗しました` };
+      }
+    }
+
+    return { handled: false };
+  }
+
+  /**
+   * AIの応答から !discord コマンドを検知して実行
+   * コードブロック内のコマンドは無視する
+   */
+  async function handleDiscordCommandsInResponse(
+    text: string,
+    sourceMessage: Message
+  ): Promise<void> {
+    const lines = text.split('\n');
+    let inCodeBlock = false;
+
+    for (const line of lines) {
+      // コードブロックの開始/終了を追跡
+      if (line.trim().startsWith('```')) {
+        inCodeBlock = !inCodeBlock;
+        continue;
+      }
+
+      // コードブロック内はスキップ
+      if (inCodeBlock) continue;
+
+      const trimmed = line.trim();
+      if (trimmed.startsWith('!discord ')) {
+        console.log(`[xangi] Processing discord command from response: ${trimmed.slice(0, 50)}...`);
+        const result = await handleDiscordCommand(trimmed, sourceMessage);
+        if (result.handled && result.response) {
+          // 結果をチャンネルに送信
+          const channel = sourceMessage.channel;
+          if ('send' in channel && typeof (channel as { send?: unknown }).send === 'function') {
+            await (channel as { send: (content: string) => Promise<unknown> }).send(
+              result.response
+            );
+          }
+        }
+      }
+
+      // !schedule コマンド（引数なしでもlist表示）
+      if (trimmed === '!schedule' || trimmed.startsWith('!schedule ')) {
+        console.log(
+          `[xangi] Processing schedule command from response: ${trimmed.slice(0, 50)}...`
+        );
+        await executeScheduleFromResponse(trimmed, sourceMessage, scheduler);
+      }
+    }
+  }
+
   // メッセージ処理
   client.on(Events.MessageCreate, async (message) => {
     if (message.author.bot) return;
@@ -209,9 +555,41 @@ async function main() {
     }
 
     let prompt = message.content
-      .replace(/<@[!&]?\d+>|<#\d+>/g, '')
+      .replace(/<@[!&]?\d+>/g, '') // ユーザーメンションのみ削除（チャンネルメンションは残す）
       .replace(/\s+/g, ' ')
       .trim();
+
+    // !discord コマンドの処理
+    if (prompt.startsWith('!discord')) {
+      const result = await handleDiscordCommand(prompt, message);
+      if (result.handled) {
+        if (result.response && 'send' in message.channel) {
+          await message.channel.send(result.response);
+        }
+        return;
+      }
+    }
+
+    // !schedule コマンドの処理
+    if (prompt.startsWith('!schedule')) {
+      await handleScheduleMessage(message, prompt, scheduler);
+      return;
+    }
+
+    // Discordリンクからメッセージ内容を取得
+    prompt = await fetchDiscordLinkContent(prompt);
+
+    // 返信元メッセージを取得してプロンプトに追加
+    const replyContent = await fetchReplyContent(message);
+    if (replyContent) {
+      prompt = replyContent + prompt;
+    }
+
+    // チャンネルメンションにID注釈を追加（展開前に実行）
+    prompt = annotateChannelMentions(prompt);
+
+    // チャンネルメンションから最新メッセージを取得
+    prompt = await fetchChannelMessages(prompt);
 
     // 添付ファイルをダウンロード
     const attachmentPaths: string[] = [];
@@ -249,13 +627,78 @@ async function main() {
       prompt = prompt.replace(/^!noskip\s*/, '').trim();
     }
 
-    await processPrompt(message, agentRunner, prompt, skipPermissions, channelId, config);
+    const result = await processPrompt(
+      message,
+      agentRunner,
+      prompt,
+      skipPermissions,
+      channelId,
+      config
+    );
+
+    // AIの応答から !discord コマンドを検知して実行
+    if (result) {
+      await handleDiscordCommandsInResponse(result, message);
+    }
   });
 
   // Discordボットを起動
   if (config.discord.enabled) {
     await client.login(config.discord.token);
     console.log('[xangi] Discord bot started');
+
+    // スケジューラにDiscord送信関数を登録
+    scheduler.registerSender('discord', async (channelId, msg) => {
+      const channel = await client.channels.fetch(channelId);
+      if (channel && 'send' in channel) {
+        await (channel as { send: (content: string) => Promise<unknown> }).send(msg);
+      }
+    });
+
+    // スケジューラにエージェント実行関数を登録
+    scheduler.registerAgentRunner('discord', async (prompt, channelId) => {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || !('send' in channel)) {
+        throw new Error(`Channel not found: ${channelId}`);
+      }
+
+      // 処理中メッセージを送信
+      const thinkingMsg = await (
+        channel as {
+          send: (content: string) => Promise<{ edit: (content: string) => Promise<unknown> }>;
+        }
+      ).send('🤔 考え中...');
+
+      try {
+        const sessionId = getSession(channelId);
+        const { result, sessionId: newSessionId } = await agentRunner.run(prompt, {
+          skipPermissions: config.agent.config.skipPermissions ?? false,
+          sessionId,
+          channelId,
+        });
+
+        setSession(channelId, newSessionId);
+
+        // 結果を送信
+        const filePaths = extractFilePaths(result);
+        const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
+
+        await thinkingMsg.edit(displayText.slice(0, DISCORD_MAX_LENGTH) || '✅');
+
+        if (filePaths.length > 0) {
+          await (
+            channel as { send: (options: { files: { attachment: string }[] }) => Promise<unknown> }
+          ).send({
+            files: filePaths.map((fp) => ({ attachment: fp })),
+          });
+        }
+
+        return result;
+      } catch (error) {
+        await thinkingMsg.edit('❌ エラーが発生しました');
+        throw error;
+      }
+    });
   }
 
   // Slackボットを起動
@@ -268,6 +711,7 @@ async function main() {
         skills = loadSkills(workdir);
         return skills;
       },
+      scheduler,
     });
     console.log('[xangi] Slack bot started');
   }
@@ -278,6 +722,18 @@ async function main() {
     );
     process.exit(1);
   }
+
+  // スケジューラの全ジョブを開始
+  scheduler.startAll();
+
+  // シャットダウン時にスケジューラを停止
+  const shutdown = () => {
+    console.log('[xangi] Shutting down scheduler...');
+    scheduler.stopAll();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 async function handleAutocomplete(
@@ -315,15 +771,15 @@ async function handleSkill(
 
   try {
     const prompt = `スキル「${skillName}」を実行してください。${args ? `引数: ${args}` : ''}`;
-    const sessionId = sessions.get(channelId);
+    const sessionId = getSession(channelId);
     const { result, sessionId: newSessionId } = await agentRunner.run(prompt, {
       skipPermissions,
       sessionId,
       channelId,
     });
 
-    sessions.set(channelId, newSessionId);
-    await interaction.editReply(result.slice(0, 2000));
+    setSession(channelId, newSessionId);
+    await interaction.editReply(result.slice(0, DISCORD_MAX_LENGTH));
   } catch (error) {
     console.error('[xangi] Error:', error);
     await interaction.editReply('エラーが発生しました');
@@ -344,23 +800,20 @@ async function handleSkillCommand(
 
   try {
     const prompt = `スキル「${skillName}」を実行してください。${args ? `引数: ${args}` : ''}`;
-    const sessionId = sessions.get(channelId);
+    const sessionId = getSession(channelId);
     const { result, sessionId: newSessionId } = await agentRunner.run(prompt, {
       skipPermissions,
       sessionId,
       channelId,
     });
 
-    sessions.set(channelId, newSessionId);
-    await interaction.editReply(result.slice(0, 2000));
+    setSession(channelId, newSessionId);
+    await interaction.editReply(result.slice(0, DISCORD_MAX_LENGTH));
   } catch (error) {
     console.error('[xangi] Error:', error);
     await interaction.editReply('エラーが発生しました');
   }
 }
-
-// ストリーミング更新の間隔（ミリ秒）
-const STREAM_UPDATE_INTERVAL_MS = 1000;
 
 async function processPrompt(
   message: Message,
@@ -369,12 +822,12 @@ async function processPrompt(
   skipPermissions: boolean,
   channelId: string,
   config: ReturnType<typeof loadConfig>
-) {
+): Promise<string | null> {
   try {
     console.log(`[xangi] Processing message in channel ${channelId}`);
     await message.react('👀').catch(() => {});
 
-    const sessionId = sessions.get(channelId);
+    const sessionId = getSession(channelId);
     const useStreaming = config.discord.streaming ?? true;
     const showThinking = config.discord.showThinking ?? true;
 
@@ -398,7 +851,7 @@ async function processPrompt(
               pendingUpdate = true;
               lastUpdateTime = now;
               replyMessage
-                .edit(fullText.slice(0, 2000) + ' ▌')
+                .edit(fullText.slice(0, DISCORD_MAX_LENGTH) + ' ▌')
                 .catch((err) => {
                   console.error('[xangi] Failed to edit message:', err.message);
                 })
@@ -430,7 +883,7 @@ async function processPrompt(
       }
     }
 
-    sessions.set(channelId, newSessionId);
+    setSession(channelId, newSessionId);
     console.log(
       `[xangi] Response length: ${result.length}, session: ${newSessionId.slice(0, 8)}...`
     );
@@ -439,11 +892,24 @@ async function processPrompt(
     const filePaths = extractFilePaths(result);
     const displayText = filePaths.length > 0 ? stripFilePaths(result) : result;
 
-    await replyMessage.edit(displayText.slice(0, 2000) || '✅');
+    // SYSTEM_COMMAND: 行と !discord / !schedule コマンド行を表示テキストから除去
+    const cleanText = displayText
+      .replace(/^SYSTEM_COMMAND:.+$/gm, '')
+      .replace(/^!discord\s+.+$/gm, '')
+      .replace(/^!schedule\s*.*/gm, '')
+      .trim();
+    await replyMessage.edit(cleanText.slice(0, DISCORD_MAX_LENGTH) || '✅');
+
+    // AIの応答から SYSTEM_COMMAND: を検知して実行
+    handleSettingsFromResponse(result);
 
     if (filePaths.length > 0 && 'send' in message.channel) {
       try {
-        await message.channel.send({
+        await (
+          message.channel as unknown as {
+            send: (options: { files: { attachment: string }[] }) => Promise<unknown>;
+          }
+        ).send({
           files: filePaths.map((fp) => ({ attachment: fp })),
         });
         console.log(`[xangi] Sent ${filePaths.length} file(s) to Discord`);
@@ -451,9 +917,421 @@ async function processPrompt(
         console.error('[xangi] Failed to send files:', err);
       }
     }
+
+    // AIの応答を返す（!discord コマンド処理用）
+    return result;
   } catch (error) {
     console.error('[xangi] Error:', error);
     await message.reply('エラーが発生しました');
+    return null;
+  }
+}
+
+/**
+ * AIの応答から SYSTEM_COMMAND: を検知して実行
+ * 形式: SYSTEM_COMMAND:restart / SYSTEM_COMMAND:set key=value
+ */
+function handleSettingsFromResponse(text: string): void {
+  const commands = text.match(/^SYSTEM_COMMAND:(.+)$/gm);
+  if (!commands) return;
+
+  for (const cmd of commands) {
+    const action = cmd.replace('SYSTEM_COMMAND:', '').trim();
+
+    if (action === 'restart') {
+      const settings = loadSettings();
+      if (!settings.autoRestart) {
+        console.log('[xangi] Restart requested but autoRestart is disabled');
+        continue;
+      }
+      console.log('[xangi] Restart requested by agent, restarting in 1s...');
+      setTimeout(() => process.exit(0), 1000);
+      return;
+    }
+
+    const setMatch = action.match(/^set\s+(\w+)=(.*)/);
+    if (setMatch) {
+      const [, key, value] = setMatch;
+      if (key === 'autoRestart') {
+        const enabled = value === 'true';
+        saveSettings({ autoRestart: enabled });
+        console.log(`[xangi] autoRestart ${enabled ? 'enabled' : 'disabled'} by agent`);
+      }
+    }
+  }
+}
+
+// ─── Schedule Handlers ──────────────────────────────────────────────
+
+async function handleScheduleCommand(
+  interaction: ChatInputCommandInteraction,
+  scheduler: Scheduler
+): Promise<void> {
+  const subcommand = interaction.options.getSubcommand();
+  const channelId = interaction.channelId;
+
+  switch (subcommand) {
+    case 'add': {
+      const input = interaction.options.getString('input', true);
+      const parsed = parseScheduleInput(input);
+      if (!parsed) {
+        await interaction.reply({
+          content:
+            '❌ 入力を解析できませんでした\n\n' +
+            '**対応フォーマット:**\n' +
+            '• `30分後 メッセージ` — 相対時間\n' +
+            '• `15:00 メッセージ` — 時刻指定\n' +
+            '• `毎日 9:00 メッセージ` — 毎日定時\n' +
+            '• `毎週月曜 10:00 メッセージ` — 週次\n' +
+            '• `cron 0 9 * * * メッセージ` — cron式',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      try {
+        const targetChannel = parsed.targetChannelId || channelId;
+        const schedule = scheduler.add({
+          ...parsed,
+          channelId: targetChannel,
+          platform: 'discord' as Platform,
+        });
+
+        const channelInfo = parsed.targetChannelId ? ` → <#${parsed.targetChannelId}>` : '';
+        const typeLabel = getTypeLabel(schedule.type, {
+          expression: schedule.expression,
+          runAt: schedule.runAt,
+          channelInfo,
+        });
+
+        await interaction.reply(
+          `✅ スケジュールを追加しました\n\n${typeLabel}\n📝 ${schedule.message}\n🆔 \`${schedule.id}\``
+        );
+      } catch (error) {
+        await interaction.reply({
+          content: `❌ ${error instanceof Error ? error.message : 'エラーが発生しました'}`,
+          ephemeral: true,
+        });
+      }
+      return;
+    }
+
+    case 'list': {
+      // 全スケジュールを表示（チャンネルでフィルタしない）
+      const schedules = scheduler.list();
+      await interaction.reply(formatScheduleList(schedules));
+      return;
+    }
+
+    case 'remove': {
+      const id = interaction.options.getString('id', true);
+      const removed = scheduler.remove(id);
+      await interaction.reply(
+        removed ? `🗑️ スケジュール \`${id}\` を削除しました` : `❌ ID \`${id}\` が見つかりません`
+      );
+      return;
+    }
+
+    case 'toggle': {
+      const id = interaction.options.getString('id', true);
+      const schedule = scheduler.toggle(id);
+      if (schedule) {
+        const status = schedule.enabled ? '✅ 有効' : '⏸️ 無効';
+        await interaction.reply(`${status} に切り替えました: \`${id}\``);
+      } else {
+        await interaction.reply(`❌ ID \`${id}\` が見つかりません`);
+      }
+      return;
+    }
+  }
+}
+
+async function handleScheduleMessage(
+  message: Message,
+  prompt: string,
+  scheduler: Scheduler
+): Promise<void> {
+  const args = prompt.replace(/^!schedule\s*/, '').trim();
+  const channelId = message.channel.id;
+
+  // !schedule (引数なし) or !schedule list → 一覧（全件表示）
+  if (!args || args === 'list') {
+    const schedules = scheduler.list();
+    await message.reply(formatScheduleList(schedules));
+    return;
+  }
+
+  // !schedule remove <id|番号> [番号2] [番号3] ...
+  if (args.startsWith('remove ') || args.startsWith('delete ') || args.startsWith('rm ')) {
+    const parts = args.split(/\s+/).slice(1).filter(Boolean);
+    if (parts.length === 0) {
+      await message.reply('使い方: `!schedule remove <ID または 番号> [番号2] ...`');
+      return;
+    }
+
+    const schedules = scheduler.list();
+    const deletedIds: string[] = [];
+    const errors: string[] = [];
+
+    // 番号を大きい順にソート（削除時のずれを防ぐ）
+    const targets = parts
+      .map((p) => {
+        const num = parseInt(p, 10);
+        if (!isNaN(num) && num > 0 && !p.startsWith('sch_')) {
+          if (num > schedules.length) {
+            errors.push(`番号 ${num} は範囲外`);
+            return null;
+          }
+          return { index: num, id: schedules[num - 1].id };
+        }
+        return { index: 0, id: p };
+      })
+      .filter((t): t is { index: number; id: string } => t !== null)
+      .sort((a, b) => b.index - a.index); // 大きい番号から削除
+
+    for (const target of targets) {
+      if (scheduler.remove(target.id)) {
+        deletedIds.push(target.id);
+      } else {
+        errors.push(`ID ${target.id} が見つからない`);
+      }
+    }
+
+    const remaining = scheduler.list();
+    let response = '';
+    if (deletedIds.length > 0) {
+      response += `✅ ${deletedIds.length}件削除しました\n\n`;
+    }
+    if (errors.length > 0) {
+      response += `⚠️ エラー: ${errors.join(', ')}\n\n`;
+    }
+    response += formatScheduleList(remaining);
+    // 2000文字制限対応
+    if (response.length <= DISCORD_MAX_LENGTH) {
+      await message.reply(response);
+    } else {
+      const chunks = splitMessage(response, DISCORD_SAFE_LENGTH);
+      for (const chunk of chunks) {
+        await message.reply(chunk);
+      }
+    }
+    return;
+  }
+
+  // !schedule toggle <id|番号>
+  if (args.startsWith('toggle ')) {
+    const idOrIndex = args.split(/\s+/)[1];
+    if (!idOrIndex) {
+      await message.reply('使い方: `!schedule toggle <ID または 番号>`');
+      return;
+    }
+
+    let targetId = idOrIndex;
+    const indexNum = parseInt(idOrIndex, 10);
+    if (!isNaN(indexNum) && indexNum > 0 && !idOrIndex.startsWith('sch_')) {
+      const schedules = scheduler.list(channelId);
+      if (indexNum > schedules.length) {
+        await message.reply(`❌ 番号 ${indexNum} は範囲外です（1〜${schedules.length}）`);
+        return;
+      }
+      targetId = schedules[indexNum - 1].id;
+    }
+
+    const schedule = scheduler.toggle(targetId);
+    if (schedule) {
+      const status = schedule.enabled ? '✅ 有効化' : '⏸️ 無効化';
+      const all = scheduler.list(channelId);
+      await message.reply(`${status}しました: ${targetId}\n\n${formatScheduleList(all)}`);
+    } else {
+      await message.reply(`❌ ID \`${targetId}\` が見つかりません`);
+    }
+    return;
+  }
+
+  // !schedule add <input> or !schedule <input> (addなしでも追加)
+  const input = args.startsWith('add ') ? args.replace(/^add\s+/, '') : args;
+  const parsed = parseScheduleInput(input);
+  if (!parsed) {
+    await message.reply(
+      '❌ 入力を解析できませんでした\n\n' +
+        '**対応フォーマット:**\n' +
+        '• `!schedule 30分後 メッセージ`\n' +
+        '• `!schedule 15:00 メッセージ`\n' +
+        '• `!schedule 毎日 9:00 メッセージ`\n' +
+        '• `!schedule 毎週月曜 10:00 メッセージ`\n' +
+        '• `!schedule cron 0 9 * * * メッセージ`\n' +
+        '• `!schedule list` / `!schedule remove <ID>`'
+    );
+    return;
+  }
+
+  try {
+    const targetChannel = parsed.targetChannelId || channelId;
+    const schedule = scheduler.add({
+      ...parsed,
+      channelId: targetChannel,
+      platform: 'discord' as Platform,
+    });
+
+    const channelInfo = parsed.targetChannelId ? ` → <#${parsed.targetChannelId}>` : '';
+    const typeLabel = getTypeLabel(schedule.type, {
+      expression: schedule.expression,
+      runAt: schedule.runAt,
+      channelInfo,
+    });
+
+    await message.reply(
+      `✅ スケジュールを追加しました\n\n${typeLabel}\n📝 ${schedule.message}\n🆔 \`${schedule.id}\``
+    );
+  } catch (error) {
+    await message.reply(`❌ ${error instanceof Error ? error.message : 'エラーが発生しました'}`);
+  }
+}
+
+/**
+ * AI応答内の !schedule コマンドを実行
+ */
+async function executeScheduleFromResponse(
+  text: string,
+  sourceMessage: Message,
+  scheduler: Scheduler
+): Promise<void> {
+  const args = text.replace(/^!schedule\s*/, '').trim();
+  const channelId = sourceMessage.channel.id;
+  const channel = sourceMessage.channel;
+
+  // list コマンド（全件表示）
+  if (!args || args === 'list') {
+    const schedules = scheduler.list();
+    const content = formatScheduleList(schedules);
+    if ('send' in channel) {
+      const sendFn = (channel as { send: (content: string) => Promise<unknown> }).send.bind(
+        channel
+      );
+      // 2000文字制限対応: 分割送信
+      if (content.length <= DISCORD_MAX_LENGTH) {
+        await sendFn(content);
+      } else {
+        const chunks = splitMessage(content, DISCORD_SAFE_LENGTH);
+        for (const chunk of chunks) {
+          await sendFn(chunk);
+        }
+      }
+    }
+    return;
+  }
+
+  // remove コマンド（複数対応）
+  if (args.startsWith('remove ') || args.startsWith('delete ') || args.startsWith('rm ')) {
+    const parts = args.split(/\s+/).slice(1).filter(Boolean);
+    if (parts.length === 0) return;
+
+    const schedules = scheduler.list();
+    const deletedIds: string[] = [];
+
+    // 番号を大きい順にソート（削除時のずれを防ぐ）
+    const targets = parts
+      .map((p) => {
+        const num = parseInt(p, 10);
+        if (!isNaN(num) && num > 0 && !p.startsWith('sch_')) {
+          if (num > schedules.length) return null;
+          return { index: num, id: schedules[num - 1].id };
+        }
+        return { index: 0, id: p };
+      })
+      .filter((t): t is { index: number; id: string } => t !== null)
+      .sort((a, b) => b.index - a.index);
+
+    for (const target of targets) {
+      if (scheduler.remove(target.id)) {
+        deletedIds.push(target.id);
+      }
+    }
+
+    if ('send' in channel && deletedIds.length > 0) {
+      const remaining = scheduler.list();
+      const content = `✅ ${deletedIds.length}件削除しました\n\n${formatScheduleList(remaining)}`;
+      const sendFn = (channel as { send: (content: string) => Promise<unknown> }).send.bind(
+        channel
+      );
+      if (content.length <= DISCORD_MAX_LENGTH) {
+        await sendFn(content);
+      } else {
+        const chunks = splitMessage(content, DISCORD_SAFE_LENGTH);
+        for (const chunk of chunks) {
+          await sendFn(chunk);
+        }
+      }
+    }
+    return;
+  }
+
+  // toggle コマンド
+  if (args.startsWith('toggle ')) {
+    const idOrIndex = args.split(/\s+/)[1];
+    if (!idOrIndex) return;
+
+    let targetId = idOrIndex;
+    const indexNum = parseInt(idOrIndex, 10);
+    if (!isNaN(indexNum) && indexNum > 0 && !idOrIndex.startsWith('sch_')) {
+      const schedules = scheduler.list(channelId);
+      if (indexNum > schedules.length) {
+        if ('send' in channel) {
+          await (channel as { send: (content: string) => Promise<unknown> }).send(
+            `❌ 番号 ${indexNum} は範囲外です（1〜${schedules.length}）`
+          );
+        }
+        return;
+      }
+      targetId = schedules[indexNum - 1].id;
+    }
+
+    const schedule = scheduler.toggle(targetId);
+    if ('send' in channel) {
+      if (schedule) {
+        const status = schedule.enabled ? '✅ 有効化' : '⏸️ 無効化';
+        const all = scheduler.list(channelId);
+        await (channel as { send: (content: string) => Promise<unknown> }).send(
+          `${status}しました: ${targetId}\n\n${formatScheduleList(all)}`
+        );
+      } else {
+        await (channel as { send: (content: string) => Promise<unknown> }).send(
+          `❌ ID \`${targetId}\` が見つかりません`
+        );
+      }
+    }
+    return;
+  }
+
+  const input = args.startsWith('add ') ? args.replace(/^add\s+/, '') : args;
+  const parsed = parseScheduleInput(input);
+  if (!parsed) {
+    console.log(`[xangi] Failed to parse schedule input: ${input}`);
+    return;
+  }
+
+  try {
+    const targetChannel = parsed.targetChannelId || channelId;
+    const schedule = scheduler.add({
+      ...parsed,
+      channelId: targetChannel,
+      platform: 'discord' as Platform,
+    });
+
+    const channelInfo = parsed.targetChannelId ? ` → <#${parsed.targetChannelId}>` : '';
+    const typeLabel = getTypeLabel(schedule.type, {
+      expression: schedule.expression,
+      runAt: schedule.runAt,
+      channelInfo,
+    });
+
+    if ('send' in channel) {
+      await (channel as { send: (content: string) => Promise<unknown> }).send(
+        `✅ スケジュールを追加しました\n\n${typeLabel}\n📝 ${schedule.message}\n🆔 \`${schedule.id}\``
+      );
+    }
+  } catch (error) {
+    console.error('[xangi] Failed to add schedule from response:', error);
   }
 }
 
