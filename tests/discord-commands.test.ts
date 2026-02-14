@@ -641,4 +641,120 @@ https://example.com/2`;
       expect(result.remaining).toBe('');
     });
   });
+
+  describe('extractDiscordCommands - history command', () => {
+    it('should extract !discord history command', () => {
+      const text = '!discord history 20';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual(['!discord history 20']);
+    });
+
+    it('should extract !discord history without count', () => {
+      const text = '!discord history';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual(['!discord history']);
+    });
+
+    it('should extract !discord history with channel', () => {
+      const text = '!discord history 10 <#123456>';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual(['!discord history 10 <#123456>']);
+    });
+
+    it('should skip !discord history inside code blocks', () => {
+      const text = '```\n!discord history 20\n```\n!discord history 10';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual(['!discord history 10']);
+    });
+
+    it('should extract history alongside other commands', () => {
+      const text = '!discord history 20\n!discord send <#123> test\n!discord channels';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual([
+        '!discord history 20',
+        '!discord send <#123> test',
+        '!discord channels',
+      ]);
+    });
+  });
+
+  describe('stripCommandsFromDisplay - history command', () => {
+    it('should remove !discord history from display', () => {
+      const text = 'テキスト前\n!discord history 20\nテキスト後';
+      const result = stripCommandsFromDisplay(text);
+      expect(result).toBe('テキスト前\nテキスト後');
+    });
+
+    it('should keep !discord history inside code blocks', () => {
+      const text = '例:\n```\n!discord history 20\n```\n以上';
+      const result = stripCommandsFromDisplay(text);
+      expect(result).toBe('例:\n```\n!discord history 20\n```\n以上');
+    });
+
+    it('should remove !discord history with channel from display', () => {
+      const text = 'テキスト前\n!discord history 10 <#123>\nテキスト後';
+      const result = stripCommandsFromDisplay(text);
+      expect(result).toBe('テキスト前\nテキスト後');
+    });
+
+    it('should remove !discord history with offset from display', () => {
+      const text = 'テキスト前\n!discord history 30 offset:30\nテキスト後';
+      const result = stripCommandsFromDisplay(text);
+      expect(result).toBe('テキスト前\nテキスト後');
+    });
+
+    it('should remove !discord history with offset and channel from display', () => {
+      const text = 'テキスト前\n!discord history 30 offset:60 <#123>\nテキスト後';
+      const result = stripCommandsFromDisplay(text);
+      expect(result).toBe('テキスト前\nテキスト後');
+    });
+  });
+
+  describe('extractDiscordCommands - history with offset', () => {
+    it('should extract !discord history with offset', () => {
+      const text = '!discord history 30 offset:30';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual(['!discord history 30 offset:30']);
+    });
+
+    it('should extract !discord history with offset and channel', () => {
+      const text = '!discord history 30 offset:60 <#123456>';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual(['!discord history 30 offset:60 <#123456>']);
+    });
+  });
+
+  describe('extractDiscordCommands - delete', () => {
+    it('should extract !discord delete with message ID', () => {
+      const text = '!discord delete 123456789012345678';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual(['!discord delete 123456789012345678']);
+    });
+
+    it('should extract !discord delete with message link', () => {
+      const text = '!discord delete https://discord.com/channels/111/222/333';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual(['!discord delete https://discord.com/channels/111/222/333']);
+    });
+
+    it('should not extract !discord delete inside code blocks', () => {
+      const text = '```\n!discord delete 123456789012345678\n```';
+      const commands = extractDiscordCommands(text);
+      expect(commands).toEqual([]);
+    });
+  });
+
+  describe('stripCommandsFromDisplay - delete', () => {
+    it('should remove !discord delete with args from display', () => {
+      const text = 'テキスト前\n!discord delete 123456789012345678\nテキスト後';
+      const result = stripCommandsFromDisplay(text);
+      expect(result).toBe('テキスト前\nテキスト後');
+    });
+
+    it('should remove !discord delete with message link from display', () => {
+      const text = 'テキスト前\n!discord delete https://discord.com/channels/111/222/333\nテキスト後';
+      const result = stripCommandsFromDisplay(text);
+      expect(result).toBe('テキスト前\nテキスト後');
+    });
+  });
 });

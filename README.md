@@ -2,11 +2,11 @@
 
 > **A**I **N**EON **G**ENESIS **I**NTELLIGENCE
 
-Claude Code CLI をバックエンドに、Discord から利用できる AI アシスタント。
+Claude Code / Codex / Gemini CLI をバックエンドに、Discord から利用できる AI アシスタント。
 
 ## Features
 
-- 🤖 Claude Code CLI をバックエンドに使用
+- 🤖 マルチバックエンド対応（Claude Code / Codex / Gemini CLI）
 - 💬 Discord 対応
 - 👤 シングルユーザー設計
 - 🐳 Docker対応（コンテナ隔離環境）
@@ -82,7 +82,11 @@ Discord で bot にメンションして話しかけてください。
 Docker を使わずにホストで直接実行する方法。
 
 ```bash
-# Node.js 22+ と Claude Code CLI が必要
+# Node.js 22+ と使用するAI CLIが必要
+# Claude Code: curl -fsSL https://claude.ai/install.sh | bash
+# Codex CLI:   npm install -g @openai/codex
+# Gemini CLI:  npm install -g @google/gemini-cli
+
 npm install
 npm run build
 npm start
@@ -116,6 +120,7 @@ pm2 logs xangi     # ログ確認
 
 | 変数 | 説明 | デフォルト |
 |------|------|-----------|
+| `AGENT_BACKEND` | エージェントバックエンド（`claude-code` / `codex` / `gemini`） | `claude-code` |
 | `WORKSPACE_PATH` | 作業ディレクトリ（ホストのパス） | `./workspace` |
 | `AUTO_REPLY_CHANNELS` | メンションなしで応答するチャンネルID（カンマ区切り） | - |
 | `AGENT_MODEL` | 使用するモデル | - |
@@ -133,6 +138,10 @@ pm2 logs xangi     # ログ確認
 - [Discord セットアップ](docs/discord-setup.md) - Bot作成・ID確認方法
 - [Slack セットアップ](docs/slack-setup.md) - Slack連携（非推奨）
 - [設計ドキュメント](docs/design.md) - アーキテクチャ・全環境変数・マウント設定
+
+## Acknowledgments
+
+xangi のコンセプトは [OpenClaw](https://github.com/openclaw/openclaw) に影響を受けています。
 
 ## License
 

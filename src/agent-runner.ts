@@ -1,6 +1,7 @@
 import type { AgentBackend, AgentConfig } from './config.js';
 import { ClaudeCodeRunner } from './claude-code.js';
 import { CodexRunner } from './codex-cli.js';
+import { GeminiRunner } from './gemini-cli.js';
 import { RunnerManager } from './runner-manager.js';
 
 export interface RunOptions {
@@ -47,6 +48,8 @@ export function createAgentRunner(backend: AgentBackend, config: AgentConfig): A
       return new ClaudeCodeRunner(config);
     case 'codex':
       return new CodexRunner(config);
+    case 'gemini':
+      return new GeminiRunner(config);
     default:
       throw new Error(`Unknown agent backend: ${backend}`);
   }
@@ -82,6 +85,8 @@ export function getBackendDisplayName(backend: AgentBackend): string {
       return 'Claude Code';
     case 'codex':
       return 'Codex';
+    case 'gemini':
+      return 'Gemini';
     default:
       return backend;
   }

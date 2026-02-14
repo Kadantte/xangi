@@ -4,7 +4,7 @@ xangiのアーキテクチャと設計思想について説明します。
 
 ## 概要
 
-xangiは「AI CLI（Claude Code / Codex CLI）をチャットプラットフォームから使えるようにするラッパー」です。
+xangiは「AI CLI（Claude Code / Codex CLI / Gemini CLI）をチャットプラットフォームから使えるようにするラッパー」です。
 
 ```
 User → Chat (Discord/Slack) → xangi → AI CLI → Workspace
@@ -20,7 +20,7 @@ User → Chat (Discord/Slack) → xangi → AI CLI → Workspace
 |----------|------|------|
 | Chat | ユーザーインターフェース | Discord.js, Slack Bolt |
 | xangi | AI CLIの統合・制御 | index.ts, agent-runner.ts |
-| AI CLI | 実際のAI処理 | Claude Code, Codex CLI |
+| AI CLI | 実際のAI処理 | Claude Code, Codex CLI, Gemini CLI |
 | Workspace | ファイル・スキル | skills/, AGENTS.md |
 
 ## コンポーネント
@@ -46,12 +46,29 @@ interface AgentRunner {
 }
 ```
 
+### システムプロンプト（base-runner.ts）
+
+xangiがAI CLIに注入するシステムプロンプトを管理：
+
+- **チャットプラットフォーム情報** — Discord/Slack経由の会話であることを伝える短い固定テキスト
+- **XANGI_COMMANDS.md** — `prompts/XANGI_COMMANDS.md` からDiscord操作コマンド・スケジューラー等の仕様を読み込み
+
+AGENTS.md / CHARACTER.md / USER.md 等のワークスペース設定は、各AI CLIの自動読み込み機能に委譲：
+
+| CLI | 自動読み込みファイル | 注入方法 |
+|-----|---------------------|----------|
+| Claude Code | `CLAUDE.md` | `--append-system-prompt`（一回限り） |
+| Codex CLI | `AGENTS.md` | `<system-context>` タグで埋め込み |
+| Gemini CLI | `GEMINI.md` | CLI側で自動読み込み（xangi側の注入なし） |
+
 ### AI CLIアダプター
 
 | ファイル | 対応CLI | 特徴 |
 |----------|---------|------|
 | claude-code.ts | Claude Code | ストリーミング対応、セッション管理 |
-| codex-cli.ts | Codex CLI | OpenAI製、ChatGPT連携 |
+| persistent-runner.ts | Claude Code（常駐） | `--input-format=stream-json` で常駐プロセス化、キュー管理、サーキットブレーカー |
+| codex-cli.ts | Codex CLI | OpenAI製、0.98.0対応、cancel対応 |
+| gemini-cli.ts | Gemini CLI | Google製、セッション管理、ストリーミング対応 |
 
 ### スケジューラー（scheduler.ts）
 
@@ -159,7 +176,7 @@ AI CLIの実装詳細を隠蔽し、交換可能に：
 
 ```typescript
 // 設定でバックエンドを切り替え
-AGENT_BACKEND=claude-code  # or codex
+AGENT_BACKEND=claude-code  # or codex or gemini
 ```
 
 将来的に新しいAI CLIが登場しても、アダプターを追加するだけで対応可能。
@@ -182,25 +199,32 @@ AIが出力する特殊コマンドを検出して自動実行：
 |--------|--------|------|
 | スケジュール | `${DATA_DIR}/schedules.json` | JSON |
 | ランタイム設定 | `${WORKSPACE}/settings.json` | JSON |
-| セッション | AI CLI内部 | CLI依存 |
+| セッション | `${DATA_DIR}/sessions.json` | JSON（チャンネルID→セッションID） |
 
 ## ファイル構成
 
 ```
 src/
-├── index.ts          # エントリーポイント、Discord統合
-├── slack.ts          # Slack統合
-├── agent-runner.ts   # AI CLIインターフェース
-├── claude-code.ts    # Claude Codeアダプター
-├── codex-cli.ts      # Codex CLIアダプター
-├── scheduler.ts      # スケジューラー
-├── schedule-cli.ts   # スケジューラーCLI
-├── skills.ts         # スキルローダー
-├── config.ts         # 設定読み込み
-├── settings.ts       # ランタイム設定
-├── file-utils.ts     # ファイル操作ユーティリティ
-├── process-manager.ts # プロセス管理
-└── runner-manager.ts  # 複数チャンネル同時処理（RunnerManager）
+├── index.ts            # エントリーポイント、Discord統合
+├── slack.ts            # Slack統合
+├── agent-runner.ts     # AI CLIインターフェース
+├── base-runner.ts      # システムプロンプト生成、XANGI_COMMANDS.md読み込み
+├── claude-code.ts      # Claude Codeアダプター（per-request）
+├── persistent-runner.ts # Claude Codeアダプター（常駐プロセス）
+├── codex-cli.ts        # Codex CLIアダプター
+├── gemini-cli.ts       # Gemini CLIアダプター
+├── scheduler.ts        # スケジューラー
+├── schedule-cli.ts     # スケジューラーCLI
+├── skills.ts           # スキルローダー
+├── config.ts           # 設定読み込み
+├── settings.ts         # ランタイム設定
+├── sessions.ts         # セッション管理
+├── file-utils.ts       # ファイル操作ユーティリティ
+├── process-manager.ts  # プロセス管理
+└── runner-manager.ts   # 複数チャンネル同時処理（RunnerManager）
+
+prompts/
+└── XANGI_COMMANDS.md   # xangi専用コマンド仕様（AI CLIに注入）
 ```
 
 ## Docker対応
@@ -212,7 +236,7 @@ src/
 │ xangi container                         │
 ├─────────────────────────────────────────┤
 │ - Node.js 22                            │
-│ - Claude Code CLI / Codex CLI           │
+│ - Claude Code CLI / Codex CLI / Gemini  │
 │ - GitHub CLI (gh)                       │
 │ - (xangi-max) uv + Python 3.12          │
 └─────────────────────────────────────────┘
@@ -257,7 +281,7 @@ src/
 
 | 変数 | 説明 | デフォルト |
 |------|------|-----------|
-| `AGENT_BACKEND` | AI CLI（`claude-code` / `codex`） | `claude-code` |
+| `AGENT_BACKEND` | AI CLI（`claude-code` / `codex` / `gemini`） | `claude-code` |
 | `AGENT_MODEL` | 使用するモデル | - |
 | `WORKSPACE_PATH` | 作業ディレクトリ（ホストのパス） | - |
 | `SKIP_PERMISSIONS` | デフォルトで許可スキップ | `false` |

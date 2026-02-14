@@ -1,66 +1,9 @@
 import { spawn } from 'child_process';
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { processManager } from './process-manager.js';
 import type { RunOptions, RunResult, StreamCallbacks } from './agent-runner.js';
 import { mergeTexts } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
-
-// チャットプラットフォーム連携用のシステムプロンプト
-const CHAT_SYSTEM_PROMPT = `あなたはチャットプラットフォーム（Discord/Slack）経由で会話しています。
-
-## セッション継続
-このセッションは --resume オプションで継続されています。過去の会話履歴は保持されているので、直前の会話内容を覚えています。「再起動したから覚えていない」とは言わないでください。
-
-## チャンネルID
-ユーザーのメッセージに <#1234567890> 形式があれば、それがチャンネルID。
-例: <#1469606785672417383> → チャンネルID は 1469606785672417383
-
-## 必須コマンド
-
-### 別チャンネルにメッセージ送信
-「〇〇チャンネルに△△って言って」と頼まれたら、必ずこのコマンドを出力すること：
-!discord send <#チャンネルID> メッセージ内容
-
-例: !discord send <#1469606785672417383> hello!
-
-### ファイル送信
-MEDIA:/path/to/file
-
-### スケジューラー（リマインダー・定期実行）
-**重要**: 「スケジュール追加して」「毎日〇〇時に△△して」「リマインダー設定して」と言われたら、必ず !schedule コマンドを使うこと。カレンダースキルではない！
-
-一覧表示：
-!schedule list
-
-追加（必ずこの形式で出力）：
-!schedule 30分後 会議の準備
-!schedule 毎日 8:00 ラジオ体操
-!schedule 毎週月曜 10:00 週次MTG
-!schedule 起動時 ウェルカムメッセージを送る
-
-削除（番号で指定）：
-!schedule remove 1
-!schedule remove 1 2 3
-
-## セッション開始時
-CLAUDE.md を読み、指示に従うこと（AGENTS.md 等の参照含む）。
-xangi専用コマンドは XANGI_COMMANDS.md を参照。
-
-## システムコマンド（応答に含めると実行される）
-
-### 再起動
-\`\`\`
-SYSTEM_COMMAND:restart
-\`\`\`
-「再起動して」と言われたらこれを応答に含める。Docker環境でも動作する。
-
-### 設定変更
-\`\`\`
-SYSTEM_COMMAND:set autoRestart=true
-SYSTEM_COMMAND:set autoRestart=false
-\`\`\`
-autoRestartが有効な場合のみ再起動が実行される。`;
+import { buildSystemPrompt } from './base-runner.js';
 
 export interface ClaudeCodeOptions {
   model?: string;
@@ -87,44 +30,14 @@ export class ClaudeCodeRunner {
   private timeoutMs: number;
   private workdir?: string;
   private skipPermissions: boolean;
+  private systemPrompt: string;
 
   constructor(options?: ClaudeCodeOptions) {
     this.model = options?.model;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS; // デフォルト5分
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
-  }
-
-  /**
-   * ワークスペースからProject Context用のファイルを読み込む
-   */
-  private loadProjectContext(): string {
-    if (!this.workdir) return '';
-
-    const files = ['AGENTS.md', 'SOUL.md', 'USER.md', 'TOOLS.md', 'IDENTITY.md', 'MEMORY.md'];
-    let context = '';
-
-    for (const file of files) {
-      const filePath = join(this.workdir, file);
-      if (!existsSync(filePath)) continue;
-
-      try {
-        const content = readFileSync(filePath, 'utf-8');
-        console.log(`[claude-code] Loaded ${file} (${content.length} bytes)`);
-        context += `\n\n## ${file}\n\n${content}`;
-      } catch (err) {
-        console.error(`[claude-code] Failed to load ${file}:`, err);
-      }
-    }
-
-    return context;
-  }
-
-  /**
-   * 完全なシステムプロンプトを生成
-   */
-  private getFullSystemPrompt(): string {
-    return CHAT_SYSTEM_PROMPT + this.loadProjectContext();
+    this.systemPrompt = buildSystemPrompt();
   }
 
   async run(prompt: string, options?: RunOptions): Promise<RunResult> {
@@ -145,7 +58,7 @@ export class ClaudeCodeRunner {
     }
 
     // チャットプラットフォーム連携のシステムプロンプト + AGENTS.md
-    args.push('--append-system-prompt', this.getFullSystemPrompt());
+    args.push('--append-system-prompt', this.systemPrompt);
 
     args.push(prompt);
 
@@ -250,7 +163,7 @@ export class ClaudeCodeRunner {
     }
 
     // チャットプラットフォーム連携のシステムプロンプト + AGENTS.md
-    args.push('--append-system-prompt', this.getFullSystemPrompt());
+    args.push('--append-system-prompt', this.systemPrompt);
 
     args.push(prompt);
 

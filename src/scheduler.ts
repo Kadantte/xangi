@@ -10,6 +10,9 @@ import {
 } from 'fs';
 import { dirname, join } from 'path';
 import cron from 'node-cron';
+/** スケジュール一覧の項目間区切り（splitMessage用） */
+export const SCHEDULE_SEPARATOR = '{{SPLIT}}';
+
 // ─── Types ───────────────────────────────────────────────────────────
 export type ScheduleType = 'cron' | 'once' | 'startup';
 export type Platform = 'discord' | 'slack';
@@ -445,19 +448,19 @@ export function formatScheduleList(
   if (regularSchedules.length > 0) {
     const lines = regularSchedules.map((s, i) => formatItem(s, i));
     sections.push(
-      `📋 **スケジュール一覧** (${regularSchedules.length}件)\n\n${lines.join('\n\n')}`
+      `📋 **スケジュール一覧** (${regularSchedules.length}件)\n\n${lines.join('\n' + SCHEDULE_SEPARATOR + '\n')}`
     );
   }
 
   if (startupTasks.length > 0) {
     const lines = startupTasks.map((s, i) => formatItem(s, i));
     sections.push(
-      `🚀 **スタートアップタスク** (${startupTasks.length}件)\n\n${lines.join('\n\n')}`
+      `🚀 **スタートアップタスク** (${startupTasks.length}件)\n\n${lines.join('\n' + SCHEDULE_SEPARATOR + '\n')}`
     );
   }
 
   const header = statusHeader.length > 0 ? statusHeader.join('\n') + '\n\n' : '';
-  return header + sections.join('\n\n') + '\n';
+  return header + sections.join('\n' + SCHEDULE_SEPARATOR + '\n') + '\n';
 }
 function formatTime(iso: string): string {
   const d = new Date(iso);
@@ -555,8 +558,6 @@ export function parseScheduleInput(input: string): {
   targetChannelId?: string;
 } | null {
   let trimmed = input.trim();
-  // --agent オプションは無視（常にagentモードで動作）
-  trimmed = trimmed.replace(/(?:^|\s)--agent(?:\s|$)/, ' ').trim();
   // -c <#channelId> または --channel <#channelId> オプションを抽出
   let targetChannelId: string | undefined;
   const channelOptMatch = trimmed.match(/(?:^|\s)(?:-c|--channel)\s+<#(\d+)>(?:\s|$)/);

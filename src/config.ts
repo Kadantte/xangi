@@ -1,6 +1,6 @@
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
 
-export type AgentBackend = 'claude-code' | 'codex';
+export type AgentBackend = 'claude-code' | 'codex' | 'gemini';
 
 export interface AgentConfig {
   model?: string;
@@ -62,8 +62,10 @@ export function loadConfig(): Config {
   const slackAllowedUsers = slackAllowedUser ? [slackAllowedUser] : [];
 
   const backend = (process.env.AGENT_BACKEND || 'claude-code') as AgentBackend;
-  if (backend !== 'claude-code' && backend !== 'codex') {
-    throw new Error(`Invalid AGENT_BACKEND: ${backend}. Must be 'claude-code' or 'codex'`);
+  if (backend !== 'claude-code' && backend !== 'codex' && backend !== 'gemini') {
+    throw new Error(
+      `Invalid AGENT_BACKEND: ${backend}. Must be 'claude-code', 'codex', or 'gemini'`
+    );
   }
 
   const agentConfig: AgentConfig = {

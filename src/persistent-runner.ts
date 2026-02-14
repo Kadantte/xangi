@@ -1,10 +1,9 @@
 import { spawn, ChildProcess } from 'child_process';
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { EventEmitter } from 'events';
 import type { RunOptions, RunResult, StreamCallbacks, AgentRunner } from './agent-runner.js';
 import { mergeTexts } from './agent-runner.js';
 import { DEFAULT_TIMEOUT_MS } from './constants.js';
+import { buildPersistentSystemPrompt } from './base-runner.js';
 
 /**
  * リクエストキューのアイテム
@@ -56,49 +55,7 @@ export class PersistentRunner extends EventEmitter implements AgentRunner {
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.workdir = options?.workdir;
     this.skipPermissions = options?.skipPermissions ?? false;
-    this.systemPrompt = this.buildSystemPrompt();
-  }
-
-  /**
-   * システムプロンプトを構築
-   */
-  private buildSystemPrompt(): string {
-    const basePrompt = `あなたはチャットプラットフォーム（Discord/Slack）経由で会話しています。
-
-## セッション継続
-このセッションは常駐プロセスで実行されています。セッション内の会話履歴は保持されます。
-
-## 必須コマンド
-### 別チャンネルにメッセージ送信
-!discord send <#チャンネルID> メッセージ内容
-
-### ファイル送信
-MEDIA:/path/to/file
-
-### スケジューラー
-!schedule list
-!schedule 30分後 会議の準備
-!schedule remove 1`;
-
-    if (!this.workdir) return basePrompt;
-
-    // Project Context を読み込み
-    const files = ['AGENTS.md', 'SOUL.md', 'USER.md', 'TOOLS.md', 'IDENTITY.md', 'MEMORY.md'];
-    let context = '';
-
-    for (const file of files) {
-      const filePath = join(this.workdir, file);
-      if (!existsSync(filePath)) continue;
-
-      try {
-        const content = readFileSync(filePath, 'utf-8');
-        context += `\n\n## ${file}\n\n${content}`;
-      } catch {
-        // ignore
-      }
-    }
-
-    return basePrompt + context;
+    this.systemPrompt = buildPersistentSystemPrompt();
   }
 
   /**

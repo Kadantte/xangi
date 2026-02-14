@@ -114,7 +114,10 @@ AIがDiscord操作を実行するためのコマンドです。
 |----------|------|
 | `!discord send <#channel> メッセージ` | 指定チャンネルにメッセージ送信 |
 | `!discord channels` | サーバーのチャンネル一覧表示 |
+| `!discord history [件数] [<#channel>]` | チャンネルの最新メッセージを取得（デフォルト10件、最大100件） |
 | `!discord search キーワード` | 現在のチャンネルでメッセージ検索 |
+| `!discord delete <メッセージID>` | 指定メッセージを削除 |
+| `!discord delete <メッセージリンク>` | リンク先のメッセージを削除（別チャンネルも可） |
 
 ### 使用例
 
@@ -125,8 +128,20 @@ AIがDiscord操作を実行するためのコマンドです。
 # チャンネル一覧を確認
 !discord channels
 
+# チャンネル履歴を取得（結果はAIのコンテキストに返る）
+!discord history              # 現在のチャンネル最新10件
+!discord history 50           # 現在のチャンネル最新50件
+!discord history 20 <#1234>   # 指定チャンネル20件
+!discord history 30 offset:30 # 30〜60件目を取得（遡り）
+
 # メッセージを検索
 !discord search PR
+
+# メッセージIDを指定して削除
+!discord delete 123456789012345678
+
+# メッセージリンクで削除（別チャンネルのメッセージもOK）
+!discord delete https://discord.com/channels/111/222/333
 ```
 
 ## コマンドプレフィックス
