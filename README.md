@@ -129,6 +129,7 @@ pm2 logs xangi     # ログ確認
 | `MAX_PROCESSES` | 同時実行プロセス数の上限 | `10` |
 | `IDLE_TIMEOUT_MS` | アイドルプロセスの自動終了時間（ミリ秒） | `1800000`（30分） |
 | `GH_TOKEN` | GitHub CLI用トークン | - |
+| `INJECT_CHANNEL_TOPIC` | チャンネルトピックをプロンプトに注入 | `true` |
 
 全ての環境変数は [設計ドキュメント](docs/design.md) を参照してください。
 

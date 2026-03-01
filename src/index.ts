@@ -1208,6 +1208,14 @@ async function main() {
 
     const channelId = message.channel.id;
 
+    // チャンネルトピック（概要）をプロンプトに注入
+    if (config.discord.injectChannelTopic !== false) {
+      const channel = message.channel;
+      if ('topic' in channel && channel.topic) {
+        prompt += `\n\n[チャンネルルール（必ず従うこと）]\n${channel.topic}`;
+      }
+    }
+
     processingChannels.add(channelId);
     try {
       const result = await processPrompt(
