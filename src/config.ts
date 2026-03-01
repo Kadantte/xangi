@@ -23,6 +23,7 @@ export interface Config {
     autoReplyChannels?: string[];
     streaming?: boolean;
     showThinking?: boolean;
+    injectChannelTopic?: boolean;
   };
   slack: {
     enabled: boolean;
@@ -91,6 +92,7 @@ export function loadConfig(): Config {
           .filter(Boolean) || [],
       streaming: process.env.DISCORD_STREAMING !== 'false',
       showThinking: process.env.DISCORD_SHOW_THINKING !== 'false',
+      injectChannelTopic: process.env.INJECT_CHANNEL_TOPIC !== 'false', // デフォルトON
     },
     slack: {
       enabled: !!slackBotToken && !!slackAppToken,

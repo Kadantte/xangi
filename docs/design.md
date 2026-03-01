@@ -264,6 +264,7 @@ prompts/
 | `AUTO_REPLY_CHANNELS` | メンションなしで応答するチャンネルID（カンマ区切り） | - |
 | `DISCORD_STREAMING` | ストリーミング出力（デフォルト: `true`） | - |
 | `DISCORD_SHOW_THINKING` | 思考過程を表示（デフォルト: `true`） | - |
+| `INJECT_CHANNEL_TOPIC` | チャンネルトピックをプロンプトに注入（デフォルト: `true`） | - |
 
 ### Slack（非推奨）
 
