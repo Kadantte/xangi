@@ -95,6 +95,42 @@ function getTypeLabel(
 // チャンネルごとの最後に送信したボットメッセージID
 const lastSentMessageIds = new Map<string, string>();
 
+/**
+ * ツール入力の要約を生成（Discord表示用）
+ */
+function formatToolInput(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case 'Read':
+      return input.file_path ? `: ${String(input.file_path).split('/').slice(-2).join('/')}` : '';
+    case 'Edit':
+    case 'Write':
+      return input.file_path ? `: ${String(input.file_path).split('/').slice(-2).join('/')}` : '';
+    case 'Bash':
+      return input.command
+        ? `: \`${String(input.command).slice(0, 60)}${String(input.command).length > 60 ? '...' : ''}\``
+        : '';
+    case 'Glob':
+      return input.pattern ? `: ${String(input.pattern)}` : '';
+    case 'Grep':
+      return input.pattern ? `: ${String(input.pattern)}` : '';
+    case 'WebFetch':
+      return input.url ? `: ${String(input.url).slice(0, 60)}` : '';
+    case 'Agent':
+      return input.description ? `: ${String(input.description)}` : '';
+    case 'Skill':
+      return input.skill ? `: ${String(input.skill)}` : '';
+    default:
+      // MCPツール (mcp__server__tool 形式)
+      if (toolName.startsWith('mcp__')) {
+        const parts = toolName.split('__');
+        const server = parts[1] || '';
+        const tool = parts[2] || '';
+        return ` (${server}/${tool})`;
+      }
+      return '';
+  }
+}
+
 async function main() {
   const config = loadConfig();
 
@@ -1724,6 +1760,8 @@ async function processPrompt(
   config: ReturnType<typeof loadConfig>
 ): Promise<string | null> {
   let replyMessage: Message | null = null;
+  const toolHistory: string[] = []; // ツール実行履歴（stop時にも参照するため関数スコープ）
+  let lastStreamedText = ''; // エラー時に途中テキストを残すため関数スコープ
   try {
     // チャンネル・ユーザー情報をプロンプトに付与
     const channelName =
@@ -1772,7 +1810,8 @@ async function processPrompt(
         if (firstTextReceived) return;
         dotCount = (dotCount % 3) + 1;
         const dots = '.'.repeat(dotCount);
-        replyMessage!.edit(`🤔 考え中${dots}`).catch(() => {});
+        const toolDisplay = toolHistory.length > 0 ? '\n' + toolHistory.slice(-5).join('\n') : '';
+        replyMessage!.edit(`🤔 考え中${dots}${toolDisplay}`).catch(() => {});
       }, 1000);
 
       let streamResult: { result: string; sessionId: string };
@@ -1781,6 +1820,7 @@ async function processPrompt(
           prompt,
           {
             onText: (_chunk, fullText) => {
+              lastStreamedText = fullText;
               if (!firstTextReceived) {
                 firstTextReceived = true;
                 clearInterval(thinkingInterval);
@@ -1797,6 +1837,15 @@ async function processPrompt(
                   .finally(() => {
                     pendingUpdate = false;
                   });
+              }
+            },
+            onToolUse: (toolName, toolInput) => {
+              // ツール実行履歴に追加
+              const inputSummary = formatToolInput(toolName, toolInput);
+              toolHistory.push(`🔧 ${toolName}${inputSummary}`);
+              if (!firstTextReceived) {
+                const toolDisplay = toolHistory.slice(-5).join('\n');
+                replyMessage!.edit(`🤔 考え中...\n${toolDisplay}`).catch(() => {});
               }
             },
           },
@@ -1895,7 +1944,11 @@ async function processPrompt(
   } catch (error) {
     if (error instanceof Error && error.message === 'Request cancelled by user') {
       console.log('[xangi] Request cancelled by user');
-      await replyMessage?.edit('🛑 停止しました').catch(() => {});
+      const toolDisplay = toolHistory.length > 0 ? '\n' + toolHistory.join('\n') + '\n' : '';
+      const prefix = lastStreamedText ? lastStreamedText + '\n\n' : '';
+      await replyMessage
+        ?.edit(`${prefix}🛑 停止しました${toolDisplay}`.slice(0, DISCORD_MAX_LENGTH))
+        .catch(() => {});
       return null;
     }
     console.error('[xangi] Error:', error);
@@ -1914,11 +1967,14 @@ async function processPrompt(
       errorDetail = `❌ エラーが発生しました: ${errorMsg.slice(0, 200)}`;
     }
 
-    // エラー詳細を表示
+    // エラー詳細を表示（途中のテキスト・ツール履歴を残す）
+    const toolDisplay = toolHistory.length > 0 ? '\n' + toolHistory.join('\n') : '';
+    const prefix = lastStreamedText ? lastStreamedText + '\n\n' : '';
+    const errorMessage = `${prefix}${errorDetail}${toolDisplay}`.slice(0, DISCORD_MAX_LENGTH);
     if (replyMessage) {
-      await replyMessage.edit(errorDetail).catch(() => {});
+      await replyMessage.edit(errorMessage).catch(() => {});
     } else {
-      await message.reply(errorDetail).catch(() => {});
+      await message.reply(errorMessage).catch(() => {});
     }
 
     // エラー後にエージェントへ自動フォローアップ（タイムアウト・サーキットブレーカー時は除く）
