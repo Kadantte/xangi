@@ -14,6 +14,7 @@ import { join } from 'path';
 import { config as dotenvConfig } from 'dotenv';
 import { startWebChat } from './web-chat.js';
 import { startLineBot } from './line.js';
+import { formatTelegramError, startTelegramBot } from './telegram.js';
 import { getEventsConfig } from './events-emitter.js';
 import { startInterInstanceChat, getInterChatConfig } from './inter-instance-chat/index.js';
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
@@ -26,6 +27,7 @@ import {
 import { registerDiscordMessageHandlers } from './discord/message-handler.js';
 import { finalizeActiveStreams } from './stream-finalizer.js';
 import { registerDiscordSchedulerBridge } from './discord/scheduler-bridge.js';
+import { runShutdownCleanup } from './shutdown.js';
 dotenvConfig({ override: true });
 
 /**
@@ -69,6 +71,7 @@ async function main() {
   const discordAllowed = config.discord.allowedUsers || [];
   const slackAllowed = config.slack.allowedUsers || [];
   const lineAllowed = config.line.allowedUsers || [];
+  const telegramAllowed = config.telegram.allowedUsers || [];
 
   if (config.discord.enabled && discordAllowed.length === 0) {
     console.error('[xangi] Error: DISCORD_ALLOWED_USER must be set (use "*" to allow everyone)');
@@ -80,6 +83,10 @@ async function main() {
   }
   if (config.line.enabled && lineAllowed.length === 0) {
     console.error('[xangi] Error: LINE_ALLOWED_USER must be set (use "*" to allow everyone)');
+    process.exit(1);
+  }
+  if (config.telegram.enabled && telegramAllowed.length === 0) {
+    console.error('[xangi] Error: TELEGRAM_ALLOWED_USER must be set (use "*" to allow everyone)');
     process.exit(1);
   }
 
@@ -99,6 +106,11 @@ async function main() {
     console.log('[xangi] LINE: All users are allowed');
   } else if (lineAllowed.length > 0) {
     console.log(`[xangi] LINE: Allowed users: ${lineAllowed.join(', ')}`);
+  }
+  if (telegramAllowed.includes('*')) {
+    console.log('[xangi] Telegram: All users are allowed');
+  } else if (telegramAllowed.length > 0) {
+    console.log(`[xangi] Telegram: Allowed users: ${telegramAllowed.join(', ')}`);
   }
 
   // バックエンドリゾルバー & 動的ランナーマネージャーを作成
@@ -172,6 +184,18 @@ async function main() {
     });
   }
 
+  // Telegram Bot 起動。接続待ちはバックグラウンドで再試行し、他媒体の起動を妨げない。
+  // startTelegramBot は最初の await より前に scheduler sender/runner を登録する。
+  if (config.telegram.enabled) {
+    void startTelegramBot({
+      config,
+      agentRunner,
+      scheduler,
+    }).catch((err) => {
+      console.error(`[xangi] Failed to start Telegram bot: ${formatTelegramError(err)}`);
+    });
+  }
+
   // インスタンス間チャット起動 (INTER_INSTANCE_CHAT_ENABLED=true のときのみ実体起動)
   const interChatCfg = getInterChatConfig();
   if (interChatCfg.enabled) {
@@ -186,6 +210,12 @@ async function main() {
   if (process.env.APPROVAL_ENABLED === 'true') {
     setApprovalEnabled(true);
   }
+
+  // ツールサーバー起動（Claude Codeからcurlで叩くAPI）
+  // イベントトリガー（POST /api/trigger）は scheduler の agentRunner 経路を再利用
+  const { startToolServer } = await import('./tool-server.js');
+  const { EventTrigger, loadTriggerConfig } = await import('./event-trigger.js');
+  startToolServer({ eventTrigger: new EventTrigger(loadTriggerConfig(), scheduler) });
 
   // Discord ボット: トークン未設定 (Web オンリーモード等) では Client を生成しない。
   // 生成だけでも discord.js の内部リソースを確保するし、login しない Client が
@@ -248,12 +278,6 @@ async function main() {
           }
         );
       });
-
-      // ツールサーバー起動（Claude Codeからcurlで叩くAPI）
-      // イベントトリガー（POST /api/trigger）は scheduler の agentRunner 経路を再利用
-      const { startToolServer } = await import('./tool-server.js');
-      const { EventTrigger, loadTriggerConfig } = await import('./event-trigger.js');
-      startToolServer({ eventTrigger: new EventTrigger(loadTriggerConfig(), scheduler) });
 
       const rest = new REST({ version: '10' }).setToken(config.discord.token);
       try {
@@ -324,9 +348,15 @@ async function main() {
   }
 
   const webChatEnabled = process.env.WEB_CHAT_ENABLED === 'true';
-  if (!config.discord.enabled && !config.slack.enabled && !webChatEnabled && !config.line.enabled) {
+  if (
+    !config.discord.enabled &&
+    !config.slack.enabled &&
+    !webChatEnabled &&
+    !config.line.enabled &&
+    !config.telegram.enabled
+  ) {
     console.error(
-      '[xangi] No chat platform enabled. Set DISCORD_TOKEN, SLACK_BOT_TOKEN/SLACK_APP_TOKEN, WEB_CHAT_ENABLED=true, or LINE_CHANNEL_ACCESS_TOKEN+LINE_CHANNEL_SECRET'
+      '[xangi] No chat platform enabled. Set DISCORD_TOKEN, SLACK_BOT_TOKEN/SLACK_APP_TOKEN, WEB_CHAT_ENABLED=true, LINE_CHANNEL_ACCESS_TOKEN+LINE_CHANNEL_SECRET, or TELEGRAM_BOT_TOKEN'
     );
     process.exit(1);
   }
@@ -335,25 +365,13 @@ async function main() {
   scheduler.startAll(config.scheduler);
 
   // シャットダウン時にスケジューラを停止し、dataDir ロックを解放
-  const shutdown = async () => {
-    console.log('[xangi] Shutting down scheduler...');
-    scheduler.stopAll();
-    // 実行中のストリーミング表示を「中断」表示で確定させる (issue #293)。
-    // pm2 の kill timeout (デフォルト 1600ms) 内で完了するよう内部で打ち切る
-    try {
-      await finalizeActiveStreams();
-    } catch {
-      // 後始末失敗で shutdown を阻害しない
-    }
-    if (releaseDataDirLock) {
-      try {
-        await releaseDataDirLock();
-      } catch {
-        // 解放に失敗しても次起動時に stale 検出で回収される
-      }
-    }
-    process.exit(0);
-  };
+  const shutdown = () =>
+    runShutdownCleanup({
+      stopScheduler: () => scheduler.stopAll(),
+      finalizeActiveStreams,
+      releaseDataDirLock,
+      exit: (code) => process.exit(code),
+    });
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }

@@ -48,6 +48,10 @@ export interface ExecuteStreamOptions {
 export interface CollectOutputOptions {
   /** exit code != 0 のとき stdout 全文からエラー詳細を抽出する（CLI の error イベント本文など） */
   exitErrorDetail?: (stdout: string) => string | undefined;
+  /** 指定時のみ、Node.js の連続デコーダで stdout / stderr を文字列化する */
+  encoding?: BufferEncoding;
+  /** exit code に関わらず stderr 全文を呼び出し元へ渡す */
+  onStderr?: (stderr: string) => void;
 }
 
 /**
@@ -177,6 +181,11 @@ export abstract class CliRunnerBase extends EventEmitter implements AgentRunner 
       let stdout = '';
       let stderr = '';
 
+      if (opts.encoding) {
+        proc.stdout?.setEncoding(opts.encoding);
+        proc.stderr?.setEncoding(opts.encoding);
+      }
+
       proc.stdout?.on('data', (data) => {
         stdout += data.toString();
       });
@@ -187,6 +196,7 @@ export abstract class CliRunnerBase extends EventEmitter implements AgentRunner 
 
       proc.on('close', (code) => {
         this.finishProcess(proc, channelId, fallbackTimer, code === 0 ? 'completed' : 'error');
+        opts.onStderr?.(stderr);
 
         if (code !== 0) {
           reject(this.buildExitError(code, opts.exitErrorDetail?.(stdout), stderr));

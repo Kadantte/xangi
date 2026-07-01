@@ -6,7 +6,7 @@ This document explains the architecture and design philosophy of xangi.
 
 ## Overview
 
-xangi is "a wrapper that makes AI CLIs (Claude Code / Codex CLI / Cursor CLI / Grok CLI) and local LLMs (Ollama, etc.) accessible from chat platforms."
+xangi is "a wrapper that makes AI CLIs (Claude Code / Codex CLI / Cursor CLI / Grok CLI / Antigravity CLI) and local LLMs (Ollama, etc.) accessible from chat platforms."
 
 ```
 User → Chat (Discord/Slack) → xangi → AI CLI → Workspace
@@ -16,23 +16,21 @@ User → Chat (Discord/Slack) → xangi → AI CLI → Workspace
 
 ```mermaid
 flowchart LR
-    User([User]) <-->|Message| chat[UI<br/>Discord / Slack<br/>Browser / LINE]
-    chat <-->|Prompt| xangi[xangi]
-    xangi <-->|Execute| LLM{{LLM Backend<br/>Claude Code / Codex<br/>Cursor CLI / Grok CLI<br/>Local LLM}}
-    LLM <-->|File Operations| WS[(Workspace<br/>AGENTS.md / skills<br/>Local docs)]
-    LLM <--> Web[Web Search]
-    LLM <--> Service[Web Service]
-    xangi -->|Periodic Execution| Scheduler
-    Scheduler -->|Prompt| LLM
+    User([User]) <-->|Message| Platform[Chat Platforms]
+    Platform <-->|Prompt / Response| xangi[xangi]
+    xangi <-->|Execute| Backend{{Agent Backends}}
+    Backend <-->|Read / Write| WS[(Workspace)]
+    Backend <--> External[External Knowledge / Web Services]
+    Scheduler[[Scheduler / Event Trigger]] -->|Prompt| xangi
 
     classDef user fill:#fef3c7,stroke:#d97706,color:#111;
     classDef core fill:#dbeafe,stroke:#1e40af,color:#111;
     classDef ws fill:#fef9c3,stroke:#a16207,color:#111;
     classDef ext fill:#f3f4f6,stroke:#6b7280,color:#111;
     class User user;
-    class chat,xangi,LLM,Scheduler core;
+    class Platform,xangi,Backend,Scheduler core;
     class WS ws;
-    class Web,Service ext;
+    class External ext;
 ```
 
 ### Layer Structure
@@ -42,7 +40,7 @@ flowchart LR
 | Chat | User interface | discord.js, @slack/bolt, http (Web Chat), @line/bot-sdk |
 | xangi | AI CLI / Local LLM integration & control | runner-manager.ts, dynamic-runner.ts, agent-runner.ts |
 | Backend Resolution | Per-channel backend resolution | backend-resolver.ts, settings.ts |
-| AI Backend | Actual AI processing | Claude Code, Codex CLI, Cursor CLI, Grok CLI, Local LLM (Ollama / vLLM) |
+| AI Backend | Actual AI processing | Claude Code, Codex CLI, Cursor CLI, Grok CLI, Antigravity CLI, Local LLM (Ollama / vLLM) |
 | Workspace | Files & skills | skills/, AGENTS.md, local docs |
 
 ## Components
@@ -52,7 +50,7 @@ flowchart LR
 A thin entry point dedicated to the startup sequence. It is responsible only for the following; the actual implementation of each feature lives in separate modules:
 
 - Configuration loading and validation (`config.ts` / `config-validate.ts`)
-- Startup branching for the enabled clients (Discord / Slack / Web Chat / LINE; a Web-only setup does not create a Discord Client)
+- Startup branching for the enabled clients (Discord / Slack / Web Chat / LINE / Telegram; a Web-only setup does not create a Discord Client)
 - Starting the scheduler and the various HTTP servers (tool-server / events-stream / event-trigger / approval-server, etc.)
 - SIGTERM/SIGINT handling (graceful shutdown, including the finalization pass in `stream-finalizer.ts`)
 
@@ -128,6 +126,20 @@ Both features can be disabled independently (`LINE_IDLE_RESET_ENABLED=false`, `L
 
 The public endpoint is provided externally (Tailscale Funnel / Cloudflare Tunnel). See [`docs/en/line-setup.md`](line-setup.md).
 
+### Telegram Bot Integration (telegram.ts)
+
+Supports messaging via Telegram Bot API. Design:
+
+- Uses `grammy` library. Supports both webhook and long polling startup modes (long polling is the default).
+- Monitors text messages (`message:text`) and processes only DMs and authorized group chats.
+- Performs allowlist validation for authorized user IDs (`TELEGRAM_ALLOWED_USER`) and authorized bot IDs (`TELEGRAM_ALLOWED_BOTS`).
+- For group chats, begins responses on bot mention, reply to bot, or message detection in `TELEGRAM_AUTO_REPLY_CHATS`.
+- Strips the `@xangi_bot` mention automatically before passing text to the Runner.
+- Implements an infinite reply loop guard (`TELEGRAM_ALLOWED_BOTS_MAX_CONSECUTIVE`) that caps consecutive replies to the same bot.
+- Updates the thinking/streaming process inline using `editMessageText` at a 1-second interval powered by `StreamSession`.
+- Caps individual messages to Telegram's 4096-character limit and splits longer text using `splitMessage`.
+- Handles session reset commands (`/reset`, `/new`, `/clear`), run cancellations (`/stop`), and simple help guidance (`/help`).
+
 ### Agent Runner (agent-runner.ts)
 
 An interface that abstracts AI CLIs:
@@ -146,7 +158,7 @@ interface AgentRunner {
 }
 ```
 
-Every Runner implementation (Claude Code / Codex / Cursor / Grok / Local LLM / Dynamic) is also
+Every Runner implementation (Claude Code / Codex / Cursor / Grok / Antigravity / Local LLM / Dynamic) is also
 an `EventEmitter` and emits `timeout-started` / `timeout-extended` / `timeout-cleared`
 events so upstream consumers (web-chat SSE / Discord bot / Slack bot) can refresh the UI.
 
@@ -218,11 +230,12 @@ AGENTS.md / CHARACTER.md / USER.md and other workspace settings are delegated to
 | codex-cli.ts | Codex CLI | Made by OpenAI, 0.98.0 compatible, cancel support |
 | cursor-cli.ts | Cursor CLI | `cursor-agent` command, JSON/stream-json, tool call display support |
 | grok-cli.ts | Grok CLI | xAI `grok` command, json/streaming-json, tool call display support |
+| antigravity-cli.ts | Antigravity CLI | Google `agy` command, headless `-p`, final-response streaming fallback |
 | local-llm/runner.ts | Local LLM | Direct calls to local LLMs like Ollama, tool execution & streaming support |
 
 #### Shared One-shot CLI Runner Core (cli-runner-core.ts)
 
-The four adapters (claude-code / codex-cli / cursor-cli / grok-cli) are built on the
+The five adapters (claude-code / codex-cli / cursor-cli / grok-cli / antigravity-cli) are built on the
 abstract base class `CliRunnerBase`. The base class owns the shared scaffolding, so each
 adapter only implements "command argument building" and "JSONL event interpretation
 (`CliStreamParser`)":
@@ -478,8 +491,8 @@ Design rationale: Step A's skill hinting is usually decisive — by surfacing "w
 
 | Category | Allowed |
 |---|---|
-| Direct read-only tools | `read` / `glob` / `grep` / `tool_search` / `discord_history` / `web_history` / `slack_history` / `discord_channels` / `discord_search` / `schedule_list` |
-| `exec` / `bash` subcommands | Only commands starting with `xangi-cmd {discord_history,web_history,slack_history,discord_channels,discord_search,schedule_list,system_settings}` |
+| Direct read-only tools | `read` / `glob` / `grep` / `tool_search` / `discord_history` / `web_history` / `slack_history` / `discord_channels` / `discord_search` / `slack_channels` / `slack_search` / `schedule_list` |
+| `exec` / `bash` subcommands | Only commands starting with `xangi-cmd {discord_history,web_history,slack_history,discord_channels,discord_search,slack_channels,slack_search,schedule_list,system_settings}` |
 | Shell metacharacters | If the command contains any of `\|` / `&` / `;` / `` ` `` / `$` / `<` / `>` / `$(...)` / `&&` / `\|\|` / `>` redirect → immediate reject |
 
 Anything else returns `{safe: false, reason}`, leading to an `unsafe_tool_in_pseudo_format` structured error that nudges the LLM toward the proper function_calling structure.
@@ -624,7 +637,7 @@ AI CLI outputs command
 
 ### GitHub App Authentication (github-auth.ts)
 
-Generates Installation Tokens (short-lived, 1-hour validity) using a GitHub App private key and wraps the `gh` CLI.
+Generates Installation Tokens (short-lived, 1-hour validity) using a GitHub App private key and wraps both the `gh` CLI and GitHub HTTPS credentials for `git`.
 
 ```
 gh command execution (inside AI CLI)
@@ -632,11 +645,19 @@ gh command execution (inside AI CLI)
   → curl to tool-server's /github-token endpoint
   → github-auth.ts generates token using in-memory private key
   → Injected as GH_TOKEN → exec real gh
+
+git fetch/push/ls-remote etc. (inside AI CLI)
+  → /tmp/xangi-gh-wrapper/git (wrapper)
+  → Disable existing credential helpers and install the GitHub HTTPS helper
+  → Fetch /github-token only when Git asks for credentials
+  → Return x-access-token user + installation token
 ```
 
 - Private key is read from file into memory at startup; file access is no longer needed
 - AI agent (child processes) cannot directly access the private key
 - No fallback to PAT on token generation failure (errors out)
+- The wrapper directory is pinned to the front of child-process `PATH` and re-applied through `BASH_ENV`, so regular `gh` / `git` binaries do not shadow the wrappers when non-interactive shells rebuild `PATH` from startup files
+- The `git` wrapper only affects GitHub HTTPS credentials and does not intercept SSH remotes.
 
 ### Trigger Feature (local-llm/triggers.ts)
 
@@ -723,7 +744,7 @@ Hides AI CLI implementation details and makes them interchangeable:
 
 ```typescript
 // Switch backends via configuration
-AGENT_BACKEND=claude-code  // or codex / cursor / grok / local-llm
+AGENT_BACKEND=claude-code  // or codex / cursor / grok / antigravity / local-llm
 ```
 
 When new AI CLIs emerge in the future, support can be added simply by creating a new adapter.
@@ -883,6 +904,7 @@ src/
 │   └── scheduler-bridge.ts # Scheduler's Discord sender/agent-runner registration
 ├── slack.ts            # Slack integration
 ├── line.ts             # LINE Bot integration (webhook + signature verification)
+├── telegram.ts         # Telegram Bot integration (polling / webhook + monitoring rules)
 ├── web-chat.ts         # Web Chat UI (HTTP server)
 ├── agent-runner.ts     # AI CLI interface
 ├── base-runner.ts      # System prompt generation
@@ -948,6 +970,7 @@ src/
 │   ├── xangi-commands-slack.ts    # Slack-specific
 │   ├── xangi-commands-web.ts      # Web-specific
 │   ├── xangi-commands-line.ts     # LINE-specific
+│   ├── xangi-commands-telegram.ts # Telegram-specific
 │   ├── chat-system-persistent.ts  # System prompt for persistent process
 │   ├── chat-system-resume.ts      # System prompt for session resume
 │   ├── platform-labels.ts         # Platform display name labels

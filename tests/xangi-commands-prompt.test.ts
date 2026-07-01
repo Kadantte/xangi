@@ -39,6 +39,24 @@ describe('buildXangiCommands trigger section', () => {
     expect(buildXangiCommands('slack')).toContain(TRIGGER_HEADING);
   });
 
+  it('discord にはセッション再開時の履歴取得指示を注入する', () => {
+    const prompt = buildXangiCommands('discord');
+    expect(prompt).toContain('## セッション再開時の文脈把握（重要）');
+    expect(prompt).toContain('xangi-cmd discord_history --count 10');
+  });
+
+  it('slack には Discord 履歴取得コマンドを注入しない', () => {
+    const prompt = buildXangiCommands('slack');
+    expect(prompt).not.toContain('xangi-cmd discord_history --count 10');
+    expect(prompt).toContain('SlackチャンネルIDはDiscord snowflakeではありません');
+    expect(prompt).toContain('xangi-cmd slack_send');
+    expect(prompt).toContain('xangi-cmd slack_channels');
+    expect(prompt).toContain('xangi-cmd slack_search');
+    expect(prompt).toContain('xangi-cmd slack_edit');
+    expect(prompt).toContain('xangi-cmd slack_delete');
+    expect(prompt).toContain('message-ts');
+  });
+
   it('TRIGGER_ENABLED=true なら platform 未指定 (後方互換) にも注入する', () => {
     process.env.TRIGGER_ENABLED = 'true';
     expect(buildXangiCommands()).toContain(TRIGGER_HEADING);

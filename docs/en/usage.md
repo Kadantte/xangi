@@ -11,7 +11,7 @@ Detailed usage guide for xangi.
 - [Timestamp Injection](#timestamp-injection)
 - [Session Management](#session-management)
 - [Scheduler](#scheduler)
-- [Discord Operations (xangi-cmd)](#discord-operations-xangi-cmd)
+- [Chat Operations (xangi-cmd)](#chat-operations-xangi-cmd)
 - [Event Trigger](#event-trigger)
 - [Runtime Settings](#runtime-settings)
 - [Autonomous AI Operations](#autonomous-ai-operations)
@@ -109,7 +109,7 @@ fires. The button **doubles the remaining time** at the moment of the click.
 - `延長` is disabled / hidden once the cap is reached
 
 Supported backends: Claude Code (persistent-runner), Codex CLI, Cursor CLI,
-Local LLM, Dynamic Runner (forwards to inner runner).
+Grok CLI, Antigravity CLI, Local LLM, Dynamic Runner (forwards to inner runner).
 
 Programmatic API:
 
@@ -200,9 +200,9 @@ Schedule data is saved in `${DATA_DIR}/schedules.json`.
 - Default: `/workspace/.xangi/schedules.json`
 - Configurable via the `DATA_DIR` environment variable
 
-## Discord Operations (xangi-cmd)
+## Chat Operations (xangi-cmd)
 
-The AI performs Discord operations via the `xangi-cmd` CLI tool. Because it routes through xangi's built-in tool-server (HTTP API), secrets like `DISCORD_TOKEN` are never accessible to the AI CLI.
+The AI performs Discord / Slack operations via the `xangi-cmd` CLI tool. Because it routes through xangi's built-in tool-server (HTTP API), secrets like `DISCORD_TOKEN` / `SLACK_BOT_TOKEN` are never accessible to the AI CLI.
 
 | Command | Description |
 | --- | --- |
@@ -215,6 +215,11 @@ The AI performs Discord operations via the `xangi-cmd` CLI tool. Because it rout
 | `xangi-cmd discord_edit --channel <ID> --message-id <ID> --content "text"` | Edit a message |
 | `xangi-cmd discord_delete --channel <ID> --message-id <ID>` | Delete a message |
 | `xangi-cmd media_send --channel <ID> --file /path/to/file` | Send a file |
+| `xangi-cmd slack_send --channel <id> --message "text" [--thread-ts <ts>]` | Send a Slack message |
+| `xangi-cmd slack_channels [--types public_channel,private_channel] [--limit N]` | List Slack channels |
+| `xangi-cmd slack_search --channel <id> --keyword "text" [--count N]` | Search Slack messages |
+| `xangi-cmd slack_edit --channel <id> --message-ts <ts> --content "text"` | Edit a Slack message |
+| `xangi-cmd slack_delete --channel <id> --message-ts <ts>` | Delete a Slack message |
 
 ### Examples
 
@@ -232,6 +237,12 @@ xangi-cmd discord_channels --guild 9876543210
 
 # Search messages
 xangi-cmd discord_search --channel 1234567890 --keyword "PR"
+
+# Slack operations
+xangi-cmd slack_send --channel C01234567 --message "Work completed!"
+xangi-cmd slack_send --channel C01234567 --thread-ts 1719876543.000100 --message "Thread reply"
+xangi-cmd slack_channels --types public_channel,private_channel --limit 100
+xangi-cmd slack_search --channel C01234567 --keyword "PR" --count 15
 ```
 
 If `--channel` is omitted while running inside xangi, the current channel ID is used automatically. When running the CLI standalone, `--channel` is required.
@@ -240,6 +251,8 @@ If `--channel` is omitted while running inside xangi, the current channel ID is 
 # Edit and delete messages
 xangi-cmd discord_edit --channel 1234567890 --message-id 111222333 --content "updated content"
 xangi-cmd discord_delete --channel 1234567890 --message-id 111222333
+xangi-cmd slack_edit --channel C01234567 --message-ts 1719876543.000100 --content "updated content"
+xangi-cmd slack_delete --channel C01234567 --message-ts 1719876543.000100
 ```
 
 ### Tool Server
@@ -352,7 +365,7 @@ Switching always starts a new session (conversation history is not carried over)
 
 ```bash
 # Allowed backends for switching (if unset, all backends are allowed)
-ALLOWED_BACKENDS=claude-code,cursor,grok,local-llm
+ALLOWED_BACKENDS=claude-code,cursor,grok,antigravity,local-llm
 
 # Allowed models for switching (if unset, no restriction)
 ALLOWED_MODELS=nemotron-3-nano,nemotron-3-super,qwen3.5:9b
@@ -500,7 +513,7 @@ Run in a container-isolated environment. Three containers are available:
 
 | Container | Dockerfile | Purpose |
 |---|---|---|
-| `xangi` | `Dockerfile` | Lightweight (Claude Code / Codex / Cursor CLI / Grok CLI) |
+| `xangi` | `Dockerfile` | Lightweight (Claude Code / Codex / Cursor CLI / Grok CLI / Antigravity CLI) |
 | `xangi-max` | `Dockerfile.max` | Full version (uv + Python support, for Local LLM) |
 | `xangi-gpu` | `Dockerfile.gpu` | GPU version (CUDA + PyTorch, for image generation / audio processing) |
 
@@ -511,6 +524,18 @@ docker compose up xangi -d --build
 
 # Claude Code authentication
 docker exec -it xangi claude
+```
+
+To run Claude Code with Anthropic API-key billing, set `ANTHROPIC_API_KEY` in `.env`.
+This value is passed only to the Claude Code child process and is not part of the general safe environment whitelist.
+Set `CLAUDE_CODE_BARE=true` when you want to force API-key auth instead of OAuth/keychain auth.
+Set `CLAUDE_CODE_MAX_BUDGET_USD` to cap API spend for each Claude Code print-mode run.
+
+```env
+AGENT_BACKEND=claude-code
+ANTHROPIC_API_KEY=sk-ant-...
+CLAUDE_CODE_BARE=true
+CLAUDE_CODE_MAX_BUDGET_USD=0.25
 ```
 
 ### Local LLM Backend (Ollama)
@@ -949,7 +974,7 @@ Environment variables passed to the AI agent (CLI spawn / Local LLM exec) are ma
 
 **Allowed variables:** `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `LC_*`, `TERM`, `TMPDIR`, `TZ`, `NODE_ENV`, `NODE_PATH`, `WORKSPACE_PATH`, `AGENT_BACKEND`, `AGENT_MODEL`, `SKIP_PERMISSIONS`, `DATA_DIR`, `XANGI_TOOL_SERVER`, `XANGI_CHANNEL_ID`
 
-`CURSOR_API_KEY` and `XAI_API_KEY` are not part of the general whitelist. They are passed only to Cursor CLI and Grok CLI child processes respectively.
+`ANTHROPIC_API_KEY`, `CURSOR_API_KEY`, and `XAI_API_KEY` are not part of the general whitelist. They are passed only to Claude Code, Cursor CLI, and Grok CLI child processes respectively.
 
 **Not passed (examples):** `DISCORD_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `LOCAL_LLM_API_KEY`, `GH_TOKEN`
 
@@ -1000,6 +1025,9 @@ To modify the whitelist, edit `ALLOWED_ENV_KEYS` in `src/safe-env.ts`.
 | `ALLOWED_BACKENDS` | Allowed backends for `/backend` switching (comma-separated). If unset, all backends are allowed | all backends |
 | `ALLOWED_MODELS` | Allowed models for `/backend` switching (comma-separated) | - |
 | `CHANNEL_OVERRIDES` | Per-channel backend settings (JSON) | - |
+| `ANTHROPIC_API_KEY` | Anthropic API key passed only to the Claude Code backend | - |
+| `CLAUDE_CODE_BARE` | Pass `--bare` to Claude Code and force API-key auth instead of OAuth/keychain auth | `false` |
+| `CLAUDE_CODE_MAX_BUDGET_USD` | Pass `--max-budget-usd` to Claude Code to cap API spend | - |
 | `CURSOR_API_KEY` | API key passed only to the Cursor CLI backend | - |
 | `CURSOR_FORCE` | Pass `--force` to Cursor CLI unless explicitly set to `false` | `true` |
 | `CURSOR_TRUST_WORKSPACE` | Pass `--trust` to Cursor CLI unless explicitly set to `false` | `true` |
@@ -1080,6 +1108,20 @@ Without these settings, existing `gh` authentication (`gh auth login` / `GH_TOKE
 
 **Docker:** The private key is auto-mounted to `/secrets/github-app.pem`. Set the host-side path in `.env`.
 
+**`gh` / `git` wrappers:** When GitHub App authentication is enabled, xangi generates `/tmp/xangi-gh-wrapper/gh` and `/tmp/xangi-gh-wrapper/git`, then pins that directory to the front of the `PATH` passed to AI agents. It also re-applies the same setting through `BASH_ENV`, so non-interactive shells are less likely to rebuild `PATH` back to the regular `gh` / `git`.
+
+The `gh` wrapper fetches a short-lived installation token from `/github-token` on each run and passes it to the real `gh` as `GH_TOKEN`. The `git` wrapper bypasses the existing `gh auth git-credential` helper and returns an installation token from `/github-token` as the `x-access-token` user only when Git asks for GitHub HTTPS credentials. SSH remotes are not affected.
+
+**Runtime check:**
+
+```bash
+curl -i "$XANGI_TOOL_SERVER/github-token"
+```
+
+- `200 OK`: GitHub App authentication is enabled
+- `404 {"error":"GitHub App is not configured"}`: this is a configuration or restart issue, not a missing implementation. Set `GITHUB_APP_*` in `.env`, then restart xangi
+- `500`: token generation failed due to the private key, App ID, Installation ID, or GitHub API call
+
 **Security:**
 - The private key is loaded into memory at startup and is not directly accessible as a file by the AI agent
 - Token generation is performed via the tool-server's HTTP endpoint (`/github-token`), and the AI agent can only obtain short-lived installation tokens (valid for 1 hour)
@@ -1103,7 +1145,17 @@ Authentication depends on a local `grok login` session or `XAI_API_KEY`. `XAI_AP
 
 When `SKIP_PERMISSIONS=true` (the default), xangi passes `--always-approve` to avoid tool approval prompts in non-interactive chat runs. This is intended for personal use in trusted workspaces.
 
-Antigravity CLI (`agy`) is not exposed as an xangi backend for now. xangi will not provide `AGENT_BACKEND=antigravity` until an official machine-readable JSON/stream output contract is available.
+### Antigravity CLI (`AGENT_BACKEND=antigravity`)
+
+The Antigravity backend uses Google's `agy` command. Install it with `curl -fsSL https://antigravity.google/cli/install.sh | bash` and complete the first-run `agy` authentication flow.
+
+Non-interactive execution uses `agy --print-timeout <timeout> -p ...`. Set `ANTIGRAVITY_PRINT_TIMEOUT` (default: `5m`) to control agy's own print-mode timeout. xangi passes `--model` when `AGENT_MODEL` is set and `--conversation` when a provider session id is available.
+
+If agy exits successfully with empty stdout, xangi surfaces timeout, quota, authentication, or other details written to stderr as the error message.
+
+When `SKIP_PERMISSIONS=true` (the default), xangi passes `--dangerously-skip-permissions` to avoid blocking on permission prompts in non-interactive chat operation. Use this only for trusted personal workspaces.
+
+Because Antigravity CLI does not currently expose a stable JSON/stream-json contract, xangi emits the final response once as a streaming fallback. The runner can be extended to incremental display when `agy` adds a machine-readable stream output.
 
 ### Local LLM (when `AGENT_BACKEND=local-llm`)
 

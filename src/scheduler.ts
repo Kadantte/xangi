@@ -9,7 +9,7 @@ import {
   unlinkSync,
 } from 'fs';
 import { dirname, join } from 'path';
-import cron from 'node-cron';
+import cron, { type ScheduledTask } from 'node-cron';
 import { isTransientNetworkError } from './errors.js';
 /** 一時的なネットワークエラー時のリトライ待機時間 (ms)。テストから上書き可能 */
 export const TRANSIENT_RETRY_DELAY_MS = process.env.VITEST ? 50 : 15_000;
@@ -19,7 +19,7 @@ export const SCHEDULE_SEPARATOR = '{{SPLIT}}';
 
 // ─── Types ───────────────────────────────────────────────────────────
 export type ScheduleType = 'cron' | 'once' | 'startup';
-export type Platform = 'discord' | 'slack';
+export type Platform = 'discord' | 'slack' | 'telegram';
 export interface Schedule {
   id: string;
   type: ScheduleType;
@@ -49,7 +49,7 @@ export interface AgentRunFn {
 // ─── Scheduler ───────────────────────────────────────────────────────
 export class Scheduler {
   private schedules: Schedule[] = [];
-  private cronJobs = new Map<string, cron.ScheduledTask>();
+  private cronJobs = new Map<string, ScheduledTask>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private filePath: string;
   private senders = new Map<Platform, SendMessageFn>();
